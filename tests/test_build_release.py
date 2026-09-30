@@ -3,6 +3,8 @@
 import hashlib
 import json
 import zipfile
+from fnmatch import fnmatch
+from pathlib import Path
 
 import pytest
 
@@ -85,3 +87,20 @@ def test_release_builder_rejects_dependency_archives(tmp_path):
     )
     with pytest.raises(ValueError, match="Unknown bundle kind"):
         pack(source, tmp_path / "dependencies.zip")
+
+
+def test_extension_release_publishes_only_distribution_archives():
+    workflow = Path(__file__).parents[1] / ".github/workflows/ci.yml"
+    value = workflow.read_text().rsplit("files:", 1)[1].strip()
+    patterns = [line.strip() for line in value.splitlines() if line.strip() != "|"]
+    expected = {
+        "dist/vis_decisions-0.1.0-py3-none-any.whl",
+        "dist/vis_decisions-0.1.0.tar.gz",
+    }
+    candidates = expected | {"dist/default.gitignore", "dist/private-data.txt"}
+    selected = {
+        name
+        for name in candidates
+        if any(fnmatch(name, pattern) for pattern in patterns)
+    }
+    assert selected == expected

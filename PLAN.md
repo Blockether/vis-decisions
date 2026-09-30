@@ -35,8 +35,13 @@ Unknowns: a single-file lossless archive still exceeds the limit; retain verifie
 
 ## Plan state
 
-Phase 1 and phase 2 complete. Phase 3 local checks are complete.
-The native SDK uploaded the 3.84 GB Decide-1B FP32 bundle and inferred with it.
-The live Vis release catalog verifies both pinned training families.
-Public repository, release, Extension Center publication and wheelhouse removal remain.
+All three phases are complete.
+Real Laya and Decide-1B training, partial resume and FP32 exports pass.
+The native SDK uploaded the 3.84 GB Decide-1B bundle and inferred with it.
+The public repository and v0.1.0 release are published.
+Extension Center pins the reviewed release revision.
+The live Vis catalog verifies both pinned training families.
+Four wheelhouse archives are removed, and release checksums include the canonical catalog.
+All original model assets keep their sizes and digests, including all six Decide-1B parts.
+The release workflow selects only distribution archives, with a regression test.
 The broader gateway suite has an unrelated SIGINT shell-control failure outside this migration.
