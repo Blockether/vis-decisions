@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vis-decisions"
+version = "0.1.0"
+description = "Train, resume, validate and publish Laya and GLiNER decision models in Vis."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "Blockether"}]
+dependencies = [
+  "vis-agent>=0.2.29",
+  "gliner2==2.0.0",
+  "laya==0.3.22",
+  "torch==2.14.0",
+  "transformers==5.17.0",
+  "onnx==1.23.1",
+  "onnxruntime==1.30.0",
+  "peft==0.21.1",
+]
+
+[project.urls]
+Source = "https://github.com/Blockether/vis-decisions"
+Issues = "https://github.com/Blockether/vis-decisions/issues"
+
+[tool.vis]
+category = "tools"
+source_paths = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=9", "ruff>=0.14", "build>=1.2", "fastapi>=0.115", "httpx>=0.28"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blockether"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+vis-agent = {git = "https://github.com/Blockether/vis", rev = "a4d343d6ddccf59159947229243333cd88a46102", subdirectory = "packages/vis-agent"}
+torch = [{index = "pytorch-cpu", marker = "sys_platform == 'linux'"}]
