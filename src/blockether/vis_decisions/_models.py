@@ -20,6 +20,12 @@ ENCODERS = {
 
 DECISION2 = {
     "decision2.0-eos-0.8b": "qwen3.5-text-endpoints-global-query-shared-bilinear-mlp",
+    "decision2.0-kai-0.6b": "qwen3-text-endpoints-global-query-shared-bilinear-mlp",
+}
+
+DECISION2_BACKBONES = {
+    "decision2.0-eos-0.8b": "qwen3_5_text",
+    "decision2.0-kai-0.6b": "qwen3",
 }
 
 DECISION2_PROMPT_VERSION = "decision2-segmented-options-global-query-v1"

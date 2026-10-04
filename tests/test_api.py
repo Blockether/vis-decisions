@@ -14,6 +14,7 @@ FAMILIES = {
     "laya-typed-decisions": ("LayaTrainingBundle", "ModernBertTrainer"),
     "gliner2.5-decide-1b": ("GlinerTrainingBundle", "GlinerTrainer"),
     "decision2.0-eos-0.8b": ("Decision2TrainingBundle", "Decision2Trainer"),
+    "decision2.0-kai-0.6b": ("Decision2TrainingBundle", "Decision2Trainer"),
 }
 
 
@@ -44,8 +45,8 @@ def test_open_selects_verified_family_and_trainer_delegates(
     if model_id == "laya-typed-decisions":
         path = checkpoint(tmp_path / "checkpoint")
     else:
-        if model_id == "decision2.0-eos-0.8b":
-            source = decision2_source(tmp_path / "source")
+        if model_id.startswith("decision2.0-"):
+            source = decision2_source(tmp_path / "source", model_id=model_id)
             weights = "decision_head.safetensors"
         else:
             source = source_checkpoint(tmp_path / "source", model_id)

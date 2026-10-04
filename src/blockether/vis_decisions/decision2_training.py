@@ -15,7 +15,7 @@ from pathlib import Path
 
 from blockether.vis._contracts import definition
 
-from ._models import DECISION2, DECISION2_PROMPT_VERSION
+from ._models import DECISION2, DECISION2_BACKBONES, DECISION2_PROMPT_VERSION
 from ._trainer import TrainingResult
 from .training import (
     TrainingBundle,
@@ -42,21 +42,29 @@ def _pinned(value: object) -> bool:
     )
 
 
-def _check_settings(root: Path, model_id: str) -> None:
-    """Accept only the shared-head architecture, its prompt and a Qwen3.5 backbone."""
+def _checkpoint_model(root: Path) -> str:
+    """Return the model whose shared-head architecture, prompt and backbone match."""
     metadata = json.loads((root / "decision_config.json").read_text(encoding="utf-8"))
     backbone = json.loads(
         (root / "backbone" / "config.json").read_text(encoding="utf-8")
     )
-    if (
-        not isinstance(metadata, dict)
-        or not isinstance(backbone, dict)
-        or metadata.get("architecture") != DECISION2[model_id]
-        or metadata.get("prompt_version") != DECISION2_PROMPT_VERSION
-        or metadata.get("head_variant", "shared") != "shared"
-        or metadata.get("checkpoint_format", "full") != "full"
-        or backbone.get("model_type") != "qwen3_5_text"
-    ):
+    for model_id, architecture in DECISION2.items():
+        if (
+            isinstance(metadata, dict)
+            and isinstance(backbone, dict)
+            and metadata.get("architecture") == architecture
+            and metadata.get("prompt_version") == DECISION2_PROMPT_VERSION
+            and metadata.get("head_variant", "shared") == "shared"
+            and metadata.get("checkpoint_format", "full") == "full"
+            and backbone.get("model_type") == DECISION2_BACKBONES[model_id]
+        ):
+            return model_id
+    raise ValueError("Decision 2.0 checkpoint config has an incompatible architecture")
+
+
+def _check_settings(root: Path, model_id: str) -> None:
+    """Accept only the architecture, prompt and backbone of the selected model."""
+    if _checkpoint_model(root) != model_id:
         raise ValueError(
             "Decision 2.0 checkpoint config has an incompatible architecture"
         )

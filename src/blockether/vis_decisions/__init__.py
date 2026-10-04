@@ -133,8 +133,9 @@ class Decisions:
 
         For GLiNER, select ``gliner2.5-base``, ``gliner2.5-small``, ``gliner2.5-multi``,
         ``gliner2.5-decide``, ``gliner2.5-decide-1b`` or ``gliner2.5-multi-decide``
-        explicitly. For Decision 2.0, select ``decision2.0-eos-0.8b``; it has no
-        action head. All model families use the same ``vis-decisions`` environment.
+        explicitly. For Decision 2.0, select ``decision2.0-eos-0.8b`` or
+        ``decision2.0-kai-0.6b``; these models have no action head. All model families
+        use the same ``vis-decisions`` environment.
         The gateway needs a pinned local checkpoint and an approved data directory. No
         model alias changes when the job finishes. Use ``get_training_job`` for progress.
         After review, activate its model_ref separately.

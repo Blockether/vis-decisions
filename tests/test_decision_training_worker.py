@@ -118,6 +118,7 @@ def test_worker_failure_leaves_no_success_descriptor(tmp_path, monkeypatch):
         "gliner2.5-decide-1b",
         "gliner2.5-multi-decide",
         "decision2.0-eos-0.8b",
+        "decision2.0-kai-0.6b",
     ],
 )
 def test_worker_selects_and_preserves_checkpoint_identity(

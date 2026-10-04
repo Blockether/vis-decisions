@@ -1,7 +1,7 @@
-"""Offline Decision 2.0 export: a Qwen3.5 text backbone with a candidate head.
+"""Offline Decision 2.0 export: a Qwen3 or Qwen3.5 backbone with a candidate head.
 
 This module is optional: importing the gateway client never loads Torch. The ONNX
-graph maps each gated delta rule layer to the ONNX Runtime
+graph maps each Qwen3.5 gated delta rule layer to the ONNX Runtime
 ``com.microsoft::LinearAttention`` CPU kernel. No checkpoint is downloaded here.
 """
 
@@ -23,22 +23,35 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer
-from transformers import Qwen3_5TextModel
+from transformers import Qwen3_5TextModel, Qwen3Model
+from transformers.models.qwen3 import modeling_qwen3
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     apply_rotary_pos_emb,
     l2norm,
     torch_chunk_gated_delta_rule,
 )
 
-from ._models import DECISION2, DECISION2_PROMPT_VERSION
-from .training import _inventory
+from ._models import DECISION2, DECISION2_BACKBONES, DECISION2_PROMPT_VERSION
+from .decision2_training import _checkpoint_model
+from .training import _inventory, _sha256
 
-MODEL_ID = "decision2.0-eos-0.8b"
 FAMILY = "decision2"
-ARCHITECTURE = DECISION2[MODEL_ID]
 PROMPT_VERSION = DECISION2_PROMPT_VERSION
 INPUT_NAMES = ("input_ids", "candidate_positions", "query_positions")
 MAX_INPUT_TOKENS = 4096
+# Each backbone type gives its class, rotary function and attention output gate.
+_BACKBONES = {
+    "qwen3_5_text": (Qwen3_5TextModel, apply_rotary_pos_emb, True),
+    "qwen3": (Qwen3Model, modeling_qwen3.apply_rotary_pos_emb, False),
+}
+_SCORE_BIAS_FORMAT = "dev2-score-bias-v1"
+_SCORED_FILES = {
+    "decision_config.json",
+    "decision_head.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+}
+_FINGERPRINT_SUFFIXES = {".json", ".safetensors", ".bin", ".model", ".txt"}
 PROBES = (
     {
         "state": "Customer: my parcel arrived broken, I want my money back.",
@@ -191,15 +204,9 @@ def _score(head, hidden, candidate_positions, query_positions):
 def load_checkpoint(source: str | Path) -> tuple[Decision2Model, Tokenizer]:
     """Load a local full checkpoint in FP32 without remote code or network access."""
     source = Path(source).expanduser().resolve()
+    backbone_class = _BACKBONES[DECISION2_BACKBONES[_checkpoint_model(source)]][0]
     metadata = json.loads((source / "decision_config.json").read_text("utf-8"))
-    if (
-        metadata.get("architecture") != ARCHITECTURE
-        or metadata.get("prompt_version") != PROMPT_VERSION
-        or metadata.get("head_variant", "shared") != "shared"
-        or metadata.get("checkpoint_format", "full") != "full"
-    ):
-        raise ValueError("Checkpoint is not a full Decision 2.0 shared-head model")
-    backbone = Qwen3_5TextModel.from_pretrained(
+    backbone = backbone_class.from_pretrained(
         source / "backbone", dtype=torch.float32, attn_implementation="sdpa"
     )
     head = CandidateHead(backbone.config.hidden_size, metadata.get("head_dim", 256))
@@ -281,17 +288,20 @@ def _linear_attention(module, hidden: torch.Tensor) -> torch.Tensor:
     return module.out_proj(core.reshape(batch, length, -1))
 
 
-def _full_attention(module, hidden, cos, sin) -> torch.Tensor:
+def _full_attention(module, hidden, cos, sin, rotate, gated) -> torch.Tensor:
     batch, length, _ = hidden.shape
     size = module.head_dim
-    query, gate = torch.chunk(
-        module.q_proj(hidden).view(batch, length, -1, size * 2), 2, dim=-1
-    )
-    gate = gate.reshape(batch, length, -1)
+    if gated:
+        query, gate = torch.chunk(
+            module.q_proj(hidden).view(batch, length, -1, size * 2), 2, dim=-1
+        )
+        gate = gate.reshape(batch, length, -1)
+    else:
+        query = module.q_proj(hidden).view(batch, length, -1, size)
     query = module.q_norm(query).transpose(1, 2)
     key = module.k_norm(module.k_proj(hidden).view(batch, length, -1, size))
     value = module.v_proj(hidden).view(batch, length, -1, size).transpose(1, 2)
-    query, key = apply_rotary_pos_emb(query, key.transpose(1, 2), cos, sin)
+    query, key = rotate(query, key.transpose(1, 2), cos, sin)
     groups = module.num_key_value_groups
     heads = key.shape[1]
     key = (
@@ -308,7 +318,9 @@ def _full_attention(module, hidden, cos, sin) -> torch.Tensor:
         query, key, value, is_causal=True, scale=module.scaling
     )
     output = output.transpose(1, 2).reshape(batch, length, -1)
-    return module.o_proj(output * torch.sigmoid(gate))
+    if gated:
+        output = output * torch.sigmoid(gate)
+    return module.o_proj(output)
 
 
 class DecisionGraph(torch.nn.Module):
@@ -317,7 +329,11 @@ class DecisionGraph(torch.nn.Module):
     def __init__(self, model: Decision2Model) -> None:
         super().__init__()
         self.model = model
-        self.layer_types = list(model.backbone.config.layer_types)
+        config = model.backbone.config
+        _, self.rotate, self.gated = _BACKBONES[config.model_type]
+        self.layer_types = list(config.layer_types)
+        if not set(self.layer_types) <= {"linear_attention", "full_attention"}:
+            raise ValueError("Decision 2.0 backbone has an unsupported layer type")
 
     def forward(self, input_ids, candidate_positions, query_positions):
         backbone = self.model.backbone
@@ -331,7 +347,9 @@ class DecisionGraph(torch.nn.Module):
             if kind == "linear_attention":
                 hidden = hidden + _linear_attention(layer.linear_attn, normed)
             else:
-                hidden = hidden + _full_attention(layer.self_attn, normed, cos, sin)
+                hidden = hidden + _full_attention(
+                    layer.self_attn, normed, cos, sin, self.rotate, self.gated
+                )
             hidden = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
         hidden = backbone.norm(hidden)
         return _score(self.model.head, hidden, candidate_positions, query_positions)
@@ -479,15 +497,80 @@ def validate_graph(
     }
 
 
+def _score_offsets(value: Any) -> bool:
+    """Accept Score offsets that map each level count L in 2..255 to L numbers."""
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and all(
+            isinstance(key, str)
+            and key.isascii()
+            and key.isdigit()
+            and str(int(key)) == key
+            and 2 <= int(key) <= 255
+            and isinstance(row, list)
+            and len(row) == int(key)
+            and all(type(item) in (int, float) and math.isfinite(item) for item in row)
+            for key, row in value.items()
+        )
+    )
+
+
+def _score_bias(source: Path) -> dict[str, list[float]] | None:
+    """Return upstream Score offsets only with the unchanged weights that they fit."""
+    path = source / "MODEL_MANIFEST.json"
+    manifest = json.loads(path.read_text("utf-8")) if path.is_file() else {}
+    entry = manifest.get("score_bias")
+    if entry is None:
+        return None
+    identity = manifest.get("identity", {})
+    expected = identity.get("fingerprint_files", {})
+    files = {
+        name: _sha256(source / name)
+        for name in expected
+        if "/" not in name and (source / name).is_file()
+    }
+    files.update(
+        (item.relative_to(source).as_posix(), _sha256(item))
+        for item in (source / "backbone").rglob("*")
+        if item.is_file() and item.suffix in _FINGERPRINT_SUFFIXES
+    )
+    canonical = json.dumps(
+        files, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    path = source / entry.get("file", "")
+    bias = (
+        json.loads(path.read_text("utf-8"))
+        if path.is_file() and _sha256(path) == entry.get("sha256")
+        else {}
+    )
+    if (
+        files != expected
+        or not _SCORED_FILES <= files.keys()
+        or digest != identity.get("model_sha256")
+        or bias.get("format") != _SCORE_BIAS_FORMAT
+        or bias.get("model_sha256") != digest
+        or bias.get("offsets") != entry.get("offsets")
+        or not _score_offsets(bias["offsets"])
+    ):
+        raise ValueError("Score offsets do not match the unchanged checkpoint weights")
+    return {key: [float(item) for item in row] for key, row in bias["offsets"].items()}
+
+
 def prepare_fp32(
     source: str | Path,
     destination: str | Path,
     *,
     license_file: str | Path,
     revision: str,
-    model_id: str = MODEL_ID,
+    model_id: str | None = None,
 ) -> dict[str, float | int]:
-    """Atomically prepare an offline, inventoried bundle from a local checkpoint."""
+    """Atomically prepare an offline, inventoried bundle from a local checkpoint.
+
+    The bundle keeps upstream Score offsets only when the manifest fingerprint
+    proves that the checkpoint has the unchanged weights that the offsets fit.
+    """
     source = Path(source).expanduser().resolve()
     destination = Path(destination).expanduser().resolve()
     if destination.exists():
@@ -495,6 +578,10 @@ def prepare_fp32(
     license_file = Path(license_file).expanduser().resolve()
     if not license_file.is_file():
         raise FileNotFoundError("An Apache-2.0 license file is required")
+    checkpoint = _checkpoint_model(source)
+    if model_id not in {None, checkpoint}:
+        raise ValueError(f"Checkpoint is not a {model_id} model")
+    score_bias = _score_bias(source)
     model, tokenizer = load_checkpoint(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -517,14 +604,16 @@ def prepare_fp32(
             "format": "onnx",
             "precision": "fp32",
             "family": FAMILY,
-            "architecture": ARCHITECTURE,
+            "architecture": DECISION2[checkpoint],
             "prompt_version": PROMPT_VERSION,
             "max_input_tokens": MAX_INPUT_TOKENS,
-            "model": model_id,
+            "model": checkpoint,
             "revision": revision,
             "license": "Apache-2.0",
             "files": _inventory(staging),
         }
+        if score_bias is not None:
+            metadata["score_bias"] = score_bias
         (staging / "PROVENANCE.json").write_text(json.dumps(metadata, indent=2) + "\n")
         staging.rename(destination)
     return report

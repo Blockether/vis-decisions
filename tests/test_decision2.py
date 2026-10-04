@@ -1,9 +1,10 @@
 """Offline Decision 2.0 checkpoints, FP32 export, training and resume.
 
-A tiny random Qwen3.5 checkpoint with the upstream layout replaces the 0.8B
+Tiny random Qwen3.5 and Qwen3 checkpoints with the upstream layout replace the real
 weights. No test downloads checkpoints or accesses Hugging Face.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,11 +15,10 @@ import pytest
 import torch
 from safetensors.torch import save_file
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
-from transformers import Qwen3_5TextConfig, Qwen3_5TextModel
+from transformers import Qwen3_5TextConfig, Qwen3_5TextModel, Qwen3Config, Qwen3Model
 
 from blockether.vis_decisions import Trainer, TrainingBundle
 from blockether.vis_decisions._decision2 import (
-    ARCHITECTURE,
     PROBES,
     PROMPT_VERSION,
     CandidateHead,
@@ -26,6 +26,7 @@ from blockether.vis_decisions._decision2 import (
     prepare_fp32,
 )
 from blockether.vis_decisions._decision2_trainer import _examples
+from blockether.vis_decisions._models import DECISION2
 from blockether.vis_decisions._publication import package
 from blockether.vis_decisions._trainer import _quality_report
 from blockether.vis_decisions.decision2_training import (
@@ -34,6 +35,8 @@ from blockether.vis_decisions.decision2_training import (
 )
 
 MODEL_ID = "decision2.0-eos-0.8b"
+KAI_ID = "decision2.0-kai-0.6b"
+SCORE_OFFSETS = {"5": [0.039188, 0.203049, 0.079362, -0.15162, -0.169979]}
 REVISION = "b" * 40
 STATES = [
     "Customer: the parcel arrived broken, I want my money back.",
@@ -43,7 +46,7 @@ STATES = [
 ]
 
 
-def source_checkpoint(root: Path, *, seed: int = 0) -> Path:
+def source_checkpoint(root: Path, *, seed: int = 0, model_id: str = MODEL_ID) -> Path:
     """Write a tiny upstream-layout checkpoint, with upstream files Vis must omit."""
     torch.manual_seed(seed)
     corpus = [json.dumps(probe) for probe in PROBES] + STATES
@@ -58,30 +61,44 @@ def source_checkpoint(root: Path, *, seed: int = 0) -> Path:
             show_progress=False,
         ),
     )
-    config = Qwen3_5TextConfig(
-        vocab_size=tokenizer.get_vocab_size(),
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=2,
-        layer_types=["linear_attention", "full_attention"],
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=32,
-        linear_num_key_heads=2,
-        linear_num_value_heads=2,
-        linear_key_head_dim=8,
-        linear_value_head_dim=8,
-        linear_conv_kernel_dim=4,
-        rope_parameters={
-            "rope_type": "default",
-            "rope_theta": 10000.0,
-            "partial_rotary_factor": 0.25,
-            "mrope_interleaved": True,
-            "mrope_section": [2, 1, 1],
-        },
-    )
+    if model_id == KAI_ID:
+        config = Qwen3Config(
+            vocab_size=tokenizer.get_vocab_size(),
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=16,
+            rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        )
+        backbone = Qwen3Model(config)
+    else:
+        config = Qwen3_5TextConfig(
+            vocab_size=tokenizer.get_vocab_size(),
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            layer_types=["linear_attention", "full_attention"],
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=32,
+            linear_num_key_heads=2,
+            linear_num_value_heads=2,
+            linear_key_head_dim=8,
+            linear_value_head_dim=8,
+            linear_conv_kernel_dim=4,
+            rope_parameters={
+                "rope_type": "default",
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": 0.25,
+                "mrope_interleaved": True,
+                "mrope_section": [2, 1, 1],
+            },
+        )
+        backbone = Qwen3_5TextModel(config)
     root.mkdir(parents=True)
-    Qwen3_5TextModel(config).save_pretrained(root / "backbone")
+    backbone.save_pretrained(root / "backbone")
     save_file(
         CandidateHead(32, head_dim=16).state_dict(), root / "decision_head.safetensors"
     )
@@ -90,7 +107,7 @@ def source_checkpoint(root: Path, *, seed: int = 0) -> Path:
     (root / "decision_config.json").write_text(
         json.dumps(
             {
-                "architecture": ARCHITECTURE,
+                "architecture": DECISION2[model_id],
                 "prompt_version": PROMPT_VERSION,
                 "head_dim": 16,
                 "head_variant": "shared",
@@ -103,17 +120,55 @@ def source_checkpoint(root: Path, *, seed: int = 0) -> Path:
     return root
 
 
-def base_checkpoint(root: Path) -> Decision2TrainingBundle:
+def base_checkpoint(root: Path, model_id: str = MODEL_ID) -> Decision2TrainingBundle:
     license_file = root / "LICENSE"
     license_file.parent.mkdir(parents=True, exist_ok=True)
     license_file.write_text("Apache-2.0")
     return Decision2TrainingBundle.from_local(
-        source_checkpoint(root / "source"),
+        source_checkpoint(root / "source", model_id=model_id),
         root / "checkpoint",
-        model_id=MODEL_ID,
+        model_id=model_id,
         revision=REVISION,
         license_file=license_file,
     )
+
+
+def score_offsets(root: Path) -> None:
+    """Bind upstream-format Score offsets to the current checkpoint files."""
+    names = [
+        path.relative_to(root).as_posix()
+        for path in sorted((root / "backbone").iterdir())
+    ]
+    names += [
+        "decision_config.json",
+        "decision_head.safetensors",
+        "tokenizer.json",
+        "tokenizer_config.json",
+    ]
+    files = {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names
+    }
+    identity = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    bias = json.dumps(
+        {
+            "format": "dev2-score-bias-v1",
+            "model_sha256": identity,
+            "offsets": SCORE_OFFSETS,
+            "fit": {},
+        }
+    )
+    (root / "score_bias.json").write_text(bias)
+    manifest = {
+        "identity": {"fingerprint_files": files, "model_sha256": identity},
+        "score_bias": {
+            "file": "score_bias.json",
+            "offsets": SCORE_OFFSETS,
+            "sha256": hashlib.sha256(bias.encode()).hexdigest(),
+        },
+    }
+    (root / "MODEL_MANIFEST.json").write_text(json.dumps(manifest))
 
 
 def row(state: str, target: int, **question) -> dict:
@@ -184,7 +239,7 @@ def test_local_checkpoint_is_inventoried_offline_and_fails_closed(tmp_path):
     bundle = base_checkpoint(tmp_path)
     metadata = provenance(bundle.path)
     assert metadata["family"] == "decision2"
-    assert metadata["architecture"] == ARCHITECTURE
+    assert metadata["architecture"] == DECISION2[MODEL_ID]
     assert metadata["model"] == bundle.model_id == MODEL_ID
     assert set(metadata["files"]) == {
         "backbone/config.json",
@@ -240,8 +295,9 @@ def test_local_checkpoint_is_inventoried_offline_and_fails_closed(tmp_path):
         Decision2Trainer(TrainingBundle)
 
 
-def test_tiny_checkpoint_exports_validated_fp32_and_packages(tmp_path):
-    bundle = base_checkpoint(tmp_path)
+@pytest.mark.parametrize("model_id", [MODEL_ID, KAI_ID])
+def test_tiny_checkpoint_exports_validated_fp32_and_packages(tmp_path, model_id):
+    bundle = base_checkpoint(tmp_path, model_id)
     report = prepare_fp32(
         bundle.path,
         tmp_path / "inference",
@@ -251,9 +307,11 @@ def test_tiny_checkpoint_exports_validated_fp32_and_packages(tmp_path):
     assert report["examples"] == len(PROBES)
     assert report["max_abs_logit_error"] <= 1e-3
     metadata = provenance(tmp_path / "inference")
+    assert metadata["model"] == model_id
     assert metadata["precision"] == "fp32"
     assert metadata["family"] == "decision2"
     assert metadata["prompt_version"] == PROMPT_VERSION
+    assert "score_bias" not in metadata
     assert set(metadata["files"]) == {
         "decision_config.json",
         "model.onnx",
@@ -265,9 +323,45 @@ def test_tiny_checkpoint_exports_validated_fp32_and_packages(tmp_path):
     assert len(digest) == 64 and size > 0
 
     settings = tmp_path / "inference" / "decision_config.json"
-    settings.write_text(settings.read_text().replace(ARCHITECTURE, "other"))
+    settings.write_text(settings.read_text().replace(DECISION2[model_id], "other"))
     with pytest.raises(ValueError, match="wrong architecture|checksum"):
         package(tmp_path / "inference", tmp_path / "tampered.zip")
+
+
+def test_kai_export_keeps_score_offsets_only_for_unchanged_weights(tmp_path):
+    source = source_checkpoint(tmp_path / "source", model_id=KAI_ID)
+    score_offsets(source)
+    license_file = tmp_path / "LICENSE"
+    license_file.write_text("Apache-2.0")
+    settings = {"license_file": license_file, "revision": REVISION}
+    with pytest.raises(ValueError, match=f"not a {MODEL_ID} model"):
+        prepare_fp32(source, tmp_path / "other", model_id=MODEL_ID, **settings)
+    report = prepare_fp32(source, tmp_path / "inference", **settings)
+    assert report["max_abs_logit_error"] <= 1e-3
+    metadata = provenance(tmp_path / "inference")
+    assert metadata["model"] == KAI_ID
+    assert metadata["architecture"] == DECISION2[KAI_ID]
+    assert metadata["score_bias"] == SCORE_OFFSETS
+
+    # A training bundle keeps only the weights, so its exports have no offsets.
+    bundle = Decision2TrainingBundle.from_local(
+        source, tmp_path / "checkpoint", model_id=KAI_ID, **settings
+    )
+    prepare_fp32(bundle.path, tmp_path / "trained", **settings)
+    assert "score_bias" not in provenance(tmp_path / "trained")
+
+    torch.manual_seed(1)
+    save_file(
+        CandidateHead(32, head_dim=16).state_dict(),
+        source / "decision_head.safetensors",
+    )
+    with pytest.raises(ValueError, match="Score offsets"):
+        prepare_fp32(source, tmp_path / "changed", **settings)
+    assert not (tmp_path / "changed").exists()
+    with pytest.raises(ValueError, match="incompatible architecture"):
+        Decision2TrainingBundle.from_local(
+            source, tmp_path / "eos", model_id=MODEL_ID, **settings
+        )
 
 
 def training_inputs(root: Path, **settings) -> dict:
@@ -292,8 +386,9 @@ def training_inputs(root: Path, **settings) -> dict:
     }
 
 
-def test_training_exports_one_head_and_resumes_a_partial_checkpoint(tmp_path):
-    bundle = base_checkpoint(tmp_path)
+@pytest.mark.parametrize("model_id", [MODEL_ID, KAI_ID])
+def test_training_exports_one_head_and_resumes_a_partial_checkpoint(tmp_path, model_id):
+    bundle = base_checkpoint(tmp_path, model_id)
     inputs = training_inputs(tmp_path / "inputs", checkpoint_steps=1)
     events = []
 
@@ -389,6 +484,8 @@ def test_official_checkpoint_exports_the_upstream_answers(tmp_path):
         revision=REVISION,
     )
     assert report["max_abs_probability_error"] <= 1e-3
+    model = provenance(tmp_path / "inference")["model"]
+    assert ("score_bias" in provenance(tmp_path / "inference")) == (model == KAI_ID)
     runtime = ort.InferenceSession(
         str(tmp_path / "inference" / "model.onnx"), providers=["CPUExecutionProvider"]
     )
@@ -405,8 +502,15 @@ def test_official_checkpoint_exports_the_upstream_answers(tmp_path):
             )
         },
     )[0]
-    # Upstream answers for the three probes: refund, true and score level 1.
-    expected = [[0.9886, 0.0045, 0.0069], [0.0292, 0.9708], [0.2933, 0.7019, 0.0049]]
+    # Upstream FP32 answers for the three probes: refund, true and a score level.
+    expected = {
+        MODEL_ID: [
+            [0.9886, 0.0045, 0.0069],
+            [0.0292, 0.9708],
+            [0.2933, 0.7019, 0.0049],
+        ],
+        KAI_ID: [[0.8997, 0.0558, 0.0445], [0.3445, 0.6555], [0.6674, 0.2783, 0.0543]],
+    }[model]
     for index, probabilities in enumerate(expected):
         count = len(probabilities)
         scores = np.exp(logits[index, :count] - logits[index, :count].max())

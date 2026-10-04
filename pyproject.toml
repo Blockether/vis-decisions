@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vis-decisions"
-version = "0.2.0"
+version = "0.3.0"
 description = "Train, resume, validate and publish Laya, GLiNER and Decision 2.0 decision models in Vis."
 keywords = ["machine-learning", "training"]
 readme = "README.md"

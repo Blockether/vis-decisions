@@ -95,6 +95,7 @@ def test_remote_training_validates_local_filenames_and_preserves_gateway_failure
         "gliner2.5-decide-1b",
         "gliner2.5-multi-decide",
         "decision2.0-eos-0.8b",
+        "decision2.0-kai-0.6b",
     ],
 )
 def test_remote_training_explicit_model_family_and_resume(model_id):
