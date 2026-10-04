@@ -36,6 +36,15 @@ class TrainingResult:
     validation_report: Path
 
 
+def _threads(torch: Any) -> int:
+    """Use `OMP_NUM_THREADS` when it is set, else PyTorch's cores that this process can use."""
+    threads = torch.get_num_threads()
+    if os.environ.get("OMP_NUM_THREADS", "").strip():
+        return threads
+    usable = getattr(os, "process_cpu_count", os.cpu_count)() or threads
+    return max(1, min(threads, usable))
+
+
 def _examples(source: str | Path) -> list[dict]:
     path = Path(source)
     if not path.is_file():
@@ -313,7 +322,7 @@ class ModernBertTrainer:
 
         self._exporter = exporter
         self._torch = exporter.torch
-        self._torch.set_num_threads(min(self._torch.get_num_threads(), 4))
+        self._torch.set_num_threads(_threads(self._torch))
         self.agent = exporter.Agent(str(self.checkpoint.path), device="cpu")
         self._closed = False
 

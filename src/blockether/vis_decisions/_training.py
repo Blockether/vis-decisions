@@ -185,7 +185,7 @@ def quantize_bundle(source, destination):
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
         options.optimized_model_filepath = str(optimized)
-        options.intra_op_num_threads = 4
+        options.intra_op_num_threads = torch.get_num_threads()
         ort.InferenceSession(
             str(graph), sess_options=options, providers=["CPUExecutionProvider"]
         )
@@ -227,7 +227,7 @@ class OnnxGraph(torch.nn.Module):
     def __init__(self, graph):
         super().__init__()
         options = ort.SessionOptions()
-        options.intra_op_num_threads = 4
+        options.intra_op_num_threads = torch.get_num_threads()
         options.inter_op_num_threads = 1
         self.session = ort.InferenceSession(
             str(graph), sess_options=options, providers=["CPUExecutionProvider"]

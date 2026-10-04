@@ -18,7 +18,7 @@ Add the extension to your project `vis.yml`:
 extensions:
   vis-decisions:
     source: https://github.com/Blockether/vis-decisions
-    version: '0.3.0'
+    version: '0.3.1'
 ```
 
 Reload the project. The first installation downloads the pinned Python dependencies.
@@ -79,6 +79,8 @@ Use complete checkpoints, not encoder-only weights or ONNX inference bundles.
 The loader verifies each file and selects the family from model provenance.
 Training rows and evaluation rows must be disjoint.
 Keep the output directory new for each run.
+Training uses one CPU thread for each physical core, or for each performance core on Apple silicon.
+To choose another number, set `OMP_NUM_THREADS` before you start Python.
 
 Decision 2.0 has no action head. Its quality policy sets only `min_decision_accuracy`.
 Its validation report gives no action accuracy.

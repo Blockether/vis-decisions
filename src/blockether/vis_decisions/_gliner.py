@@ -187,7 +187,7 @@ def export_graph(model, output: str | Path) -> Path:
 def validate_graph(model, output: str | Path) -> dict[str, float | int]:
     """Compare dynamic ONNX logits and both classification heads with upstream."""
     options = ort.SessionOptions()
-    options.intra_op_num_threads = 4
+    options.intra_op_num_threads = torch.get_num_threads()
     runtime = ort.InferenceSession(
         str(output), sess_options=options, providers=["CPUExecutionProvider"]
     )

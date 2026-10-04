@@ -26,6 +26,7 @@ from ._trainer import (
     _publish_checkpoint,
     _quality_report,
     _Schedule,
+    _threads,
     _training_config,
 )
 from .training import _sha256
@@ -153,7 +154,7 @@ class Decision2Trainer:
 
         self._exporter = exporter
         self._torch = exporter.torch
-        self._torch.set_num_threads(min(self._torch.get_num_threads(), 4))
+        self._torch.set_num_threads(_threads(self._torch))
         self._tokenizer = exporter.Tokenizer.from_file(
             str(self.checkpoint.path / "tokenizer.json")
         )
@@ -208,7 +209,7 @@ class Decision2Trainer:
         )
         model, _ = self._exporter.load_checkpoint(checkpoint)
         options = self._exporter.ort.SessionOptions()
-        options.intra_op_num_threads = 4
+        options.intra_op_num_threads = self._torch.get_num_threads()
         runtime = self._exporter.ort.InferenceSession(
             str(inference / "model.onnx"),
             sess_options=options,

@@ -453,7 +453,7 @@ def validate_graph(
 ) -> dict[str, float | int]:
     """Compare ONNX logits with the PyTorch reference, one row and one padded batch."""
     options = ort.SessionOptions()
-    options.intra_op_num_threads = 4
+    options.intra_op_num_threads = torch.get_num_threads()
     runtime = ort.InferenceSession(
         str(output), sess_options=options, providers=["CPUExecutionProvider"]
     )

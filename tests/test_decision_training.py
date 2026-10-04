@@ -250,6 +250,24 @@ def test_training_requires_both_labels_and_an_explicit_quality_gate(tmp_path):
     assert _config(policy, kind="quality policy")["min_action_accuracy"] == 0.9
 
 
+def test_training_threads_follow_omp_or_the_usable_cores(monkeypatch):
+    from blockether.vis_decisions._trainer import _threads
+
+    torch = SimpleNamespace(get_num_threads=lambda: 10)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.setattr("os.process_cpu_count", lambda: 6, raising=False)
+    assert _threads(torch) == 6
+    monkeypatch.setattr("os.process_cpu_count", lambda: 16, raising=False)
+    assert _threads(torch) == 10
+    monkeypatch.setattr("os.process_cpu_count", lambda: None, raising=False)
+    assert _threads(torch) == 10
+
+    # PyTorch already reads OMP_NUM_THREADS; an explicit value is not capped.
+    monkeypatch.setenv("OMP_NUM_THREADS", "12")
+    monkeypatch.setattr("os.process_cpu_count", lambda: 6, raising=False)
+    assert _threads(SimpleNamespace(get_num_threads=lambda: 12)) == 12
+
+
 def test_inventory_hashes_bundle_files_in_order_without_the_license(tmp_path):
     from blockether.vis_decisions.training import _inventory
 
