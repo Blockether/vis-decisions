@@ -1,4 +1,4 @@
-"""One training interface for complete, verified Laya and GLiNER checkpoints."""
+"""One training interface for complete, verified Laya, GLiNER and Decision 2.0 checkpoints."""
 
 from __future__ import annotations
 
@@ -7,12 +7,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ._models import ARCHITECTURES
+from ._models import ARCHITECTURES, DECISION2
 from ._trainer import ModernBertTrainer, TrainingResult
+from .decision2_training import Decision2Trainer, Decision2TrainingBundle
 from .gliner_training import GlinerTrainer, GlinerTrainingBundle
 from .training import TrainingBundle as LayaTrainingBundle
 
-Bundle = LayaTrainingBundle | GlinerTrainingBundle
+Bundle = LayaTrainingBundle | GlinerTrainingBundle | Decision2TrainingBundle
 
 
 class TrainingBundle:
@@ -28,6 +29,8 @@ class TrainingBundle:
             return LayaTrainingBundle.open(root)
         if model_id in ARCHITECTURES:
             return GlinerTrainingBundle.open(root)
+        if model_id in DECISION2:
+            return Decision2TrainingBundle.open(root)
         raise ValueError("Unsupported decision training model identity")
 
     @staticmethod
@@ -40,21 +43,26 @@ class TrainingBundle:
             return GlinerTrainingBundle.fetch(
                 model_ref=model_ref, cache_dir=destination
             )
+        if model_id in DECISION2:
+            return Decision2TrainingBundle.fetch(
+                model_ref=model_ref, cache_dir=destination
+            )
         raise ValueError("Unsupported decision training model identity")
 
 
 class Trainer:
-    """Train, continue or resume either family with disjoint held-out validation."""
+    """Train, continue or resume any family with disjoint held-out validation."""
 
     def __init__(self, checkpoint: Bundle) -> None:
         if not isinstance(checkpoint, LayaTrainingBundle):
             raise TypeError("TrainingBundle.open or TrainingBundle.fetch is required")
         self.checkpoint = checkpoint
-        self._trainer = (
-            GlinerTrainer(checkpoint)
-            if isinstance(checkpoint, GlinerTrainingBundle)
-            else ModernBertTrainer(checkpoint)
-        )
+        if isinstance(checkpoint, GlinerTrainingBundle):
+            self._trainer = GlinerTrainer(checkpoint)
+        elif isinstance(checkpoint, Decision2TrainingBundle):
+            self._trainer = Decision2Trainer(checkpoint)
+        else:
+            self._trainer = ModernBertTrainer(checkpoint)
 
     def __enter__(self) -> Trainer:
         return self
@@ -76,7 +84,7 @@ class Trainer:
         output_dir: str | Path,
         progress: Callable[[dict], None] | None = None,
     ) -> TrainingResult:
-        """Fine-tune both heads and export only after independent validation.
+        """Fine-tune the model heads and export only after independent validation.
 
         A matching partial checkpoint resumes its exact step and batch order.
         New data or settings start a new run from the checkpoint's saved weights.
@@ -99,7 +107,7 @@ class Trainer:
         validation_policy: str | Path,
         progress: Callable[[dict], None] | None = None,
     ) -> TrainingResult:
-        """Export an unchanged checkpoint and validate both heads without training."""
+        """Export an unchanged checkpoint and validate its heads without training."""
         return self._trainer.prepare_fp32(
             output_dir=output_dir,
             eval_data=eval_data,

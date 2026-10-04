@@ -12,7 +12,7 @@ from typing import BinaryIO
 
 from blockether.vis._contracts import definition
 
-from ._models import ARCHITECTURES
+from ._models import ARCHITECTURES, DECISION2, DECISION2_PROMPT_VERSION
 
 _REQUIRED_LAYA = {
     "model.onnx",
@@ -24,6 +24,13 @@ _REQUIRED_GLINER = {
     "model.onnx",
     "config.json",
     "encoder_config/config.json",
+    "tokenizer/tokenizer.json",
+    "tokenizer/tokenizer_config.json",
+}
+_REQUIRED_DECISION2 = {
+    "model.onnx",
+    "model.onnx.data",
+    "decision_config.json",
     "tokenizer/tokenizer.json",
     "tokenizer/tokenizer_config.json",
 }
@@ -56,16 +63,17 @@ def _source(bundle: Path) -> list[Path]:
     provenance = json.loads(source.read_text(encoding="utf-8"))
     model_id = provenance.get("model")
     gliner = isinstance(model_id, str) and model_id in ARCHITECTURES
+    decision2 = isinstance(model_id, str) and model_id in DECISION2
     if (
         not isinstance(model_id, str)
-        or model_id not in {"laya-typed-decisions", *ARCHITECTURES}
+        or model_id not in {"laya-typed-decisions", *ARCHITECTURES, *DECISION2}
         or provenance.get("kind") != "inference"
         or provenance.get("format") != "onnx"
         or provenance.get("precision") != "fp32"
         or provenance.get("license") != "Apache-2.0"
         or not isinstance(provenance.get("revision"), str)
         or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", provenance["revision"])
-        or (not gliner and provenance.get("family") is not None)
+        or (not gliner and not decision2 and provenance.get("family") is not None)
     ):
         raise ValueError(
             "Only a complete supported FP32 inference bundle can be uploaded"
@@ -75,17 +83,23 @@ def _source(bundle: Path) -> list[Path]:
         or provenance.get("architecture") != ARCHITECTURES[model_id]
     ):
         raise ValueError("GLiNER bundle provenance has the wrong architecture")
+    if decision2 and (
+        provenance.get("family") != "decision2"
+        or provenance.get("architecture") != DECISION2[model_id]
+        or provenance.get("prompt_version") != DECISION2_PROMPT_VERSION
+    ):
+        raise ValueError("Decision 2.0 bundle provenance has the wrong architecture")
     entries = provenance.get("files")
-    required = _REQUIRED_GLINER if gliner else _REQUIRED_LAYA
+    if gliner:
+        required, config_name = _REQUIRED_GLINER, "config.json"
+    elif decision2:
+        required, config_name = _REQUIRED_DECISION2, "decision_config.json"
+    else:
+        required, config_name = _REQUIRED_LAYA, "rl_agent_config.json"
     if not isinstance(entries, dict) or not required <= entries.keys():
         raise ValueError("Decision bundle is missing its inference inventory")
     if not all(
-        name
-        in {
-            "model.onnx",
-            "model.onnx.data",
-            "config.json" if gliner else "rl_agent_config.json",
-        }
+        name in {"model.onnx", "model.onnx.data", config_name}
         or (gliner and name == "encoder_config/config.json")
         or re.fullmatch(r"tokenizer/[A-Za-z0-9_.-]+\.(?:json|txt)", name)
         for name in entries
@@ -95,6 +109,12 @@ def _source(bundle: Path) -> list[Path]:
         config = json.loads((bundle / "config.json").read_text(encoding="utf-8"))
         if config.get("architecture") != ARCHITECTURES[model_id]:
             raise ValueError("GLiNER bundle config has the wrong architecture")
+    if decision2:
+        config = json.loads(
+            (bundle / "decision_config.json").read_text(encoding="utf-8")
+        )
+        if config.get("architecture") != DECISION2[model_id]:
+            raise ValueError("Decision 2.0 bundle config has the wrong architecture")
     paths = []
     expanded = 0
     for path in bundle.rglob("*"):

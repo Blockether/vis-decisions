@@ -19,7 +19,7 @@ from blockether.vis.engine import (
     TransportError,
 )
 
-from ._models import ARCHITECTURES
+from ._models import ARCHITECTURES, DECISION2
 from ._publication import ProgressReader, package
 from .api import Trainer, TrainingBundle, TrainingResult
 
@@ -133,7 +133,8 @@ class Decisions:
 
         For GLiNER, select ``gliner2.5-base``, ``gliner2.5-small``, ``gliner2.5-multi``,
         ``gliner2.5-decide``, ``gliner2.5-decide-1b`` or ``gliner2.5-multi-decide``
-        explicitly. Both model families use the same ``vis-decisions`` environment.
+        explicitly. For Decision 2.0, select ``decision2.0-eos-0.8b``; it has no
+        action head. All model families use the same ``vis-decisions`` environment.
         The gateway needs a pinned local checkpoint and an approved data directory. No
         model alias changes when the job finishes. Use ``get_training_job`` for progress.
         After review, activate its model_ref separately.
@@ -151,7 +152,10 @@ class Decisions:
             for value, extension in names.values()
         ):
             raise ValueError("Training inputs must be approved gateway-local filenames")
-        if model_id != "laya-typed-decisions" and model_id not in ARCHITECTURES:
+        if model_id != "laya-typed-decisions" and model_id not in {
+            *ARCHITECTURES,
+            *DECISION2,
+        }:
             raise ValueError("Unsupported decision training model_id")
         if source_job_id is not None and not _valid_job_id(source_job_id):
             raise ValueError("source_job_id must be a previously completed job id")

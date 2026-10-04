@@ -63,12 +63,12 @@ for name, label, tag in (
 vis.register_extension(
     vis.Extension(
         name="vis-decisions",
-        version="0.1.1",
-        description="Train, resume, validate and export Laya and GLiNER decision models.",
+        version="0.2.0",
+        description="Train, resume, validate and export Laya, GLiNER and Decision 2.0 models.",
         alias="decisions",
         symbols=[vis.Symbol(DecisionTools(), name="decisions")],
         prompt=(
-            "decisions trains Laya and GLiNER with one runtime. fetch downloads only a verified checkpoint. "
+            "decisions trains Laya, GLiNER and Decision 2.0 with one runtime. fetch downloads only a verified checkpoint. "
             "train accepts local labeled rows and disjoint held-out rows, and resumes matching partial checkpoints. "
             "prepare exports without training; package includes inference files only. "
             "Training does not activate a gateway alias. Publishing and activation use the Decisions Python client."

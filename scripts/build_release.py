@@ -1,8 +1,9 @@
-"""Verify and reproducibly pack prepared Laya release assets, without network access.
+"""Verify and reproducibly pack prepared decision release assets offline.
 
 The prepared folders contain PROVENANCE.json, complete model/lock inventories and
 license notices. This command checks every declared digest before writing a ZIP;
 it does not train or download a model. Prepare and validate exports separately.
+The command prints the archive sizes and digests for the Vis catalog.
 """
 
 from __future__ import annotations
@@ -17,6 +18,34 @@ from pathlib import Path
 
 _TIMESTAMP = (2025, 1, 1, 0, 0, 0)
 _NAME = re.compile(r"[a-z0-9][a-z0-9+._-]*\.zip\Z")
+# Laya provenance has no family. Decision 2.0 keeps its backbone and head apart.
+_MANDATORY = {
+    None: {
+        "inference": {"model.onnx", "rl_agent_config.json", "tokenizer/tokenizer.json"},
+        "training": {
+            "model.safetensors",
+            "rl_agent_config.json",
+            "tokenizer/tokenizer.json",
+        },
+    },
+    "decision2": {
+        "inference": {
+            "decision_config.json",
+            "model.onnx",
+            "model.onnx.data",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+        },
+        "training": {
+            "backbone/config.json",
+            "backbone/model.safetensors",
+            "decision_config.json",
+            "decision_head.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        },
+    },
+}
 
 
 def digest(path: Path) -> str:
@@ -41,8 +70,10 @@ def inventory(source: Path) -> list[tuple[str, Path]]:
         if kind == "inference" and metadata.get("precision") != "fp32":
             raise ValueError("Only full FP32 inference bundles may be released")
         declared = metadata.get("files")
-        mandatory = {"LICENSE.txt", "rl_agent_config.json", "tokenizer/tokenizer.json"}
-        mandatory.add("model.onnx" if kind == "inference" else "model.safetensors")
+        required = _MANDATORY.get(metadata.get("family"))
+        if required is None:
+            raise ValueError("Unknown model family")
+        mandatory = {"LICENSE.txt", *required[kind]}
     else:
         raise ValueError("Unknown bundle kind")
     if not declared:
@@ -130,14 +161,19 @@ def main() -> None:
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
     lines = []
+    artifacts = []
     names = [name for name, _ in args.bundle] + [path.name for path in args.existing]
     if len(names) != len(set(names)) or any(
         not _NAME.fullmatch(name) for name, _ in args.bundle
     ):
         parser.error("Bundle names must be distinct safe ZIP basenames")
     for name, directory in args.bundle:
-        checksum = pack(Path(directory), output / name)
+        archive = output / name
+        checksum = pack(Path(directory), archive)
         lines.append(f"{checksum}  {name}")
+        artifacts.append(
+            {"file": name, "bytes": archive.stat().st_size, "sha256": checksum}
+        )
     for path in args.existing:
         if not path.is_file() or path.name == "SHA256SUMS.txt":
             parser.error("Only existing speech release payloads may be retained")
@@ -148,6 +184,7 @@ def main() -> None:
             shutil.copyfile(path, target)
         lines.append(f"{digest(target)}  {target.name}")
     (output / "SHA256SUMS.txt").write_text("\n".join(sorted(lines)) + "\n")
+    print(json.dumps(artifacts, indent=2))
 
 
 if __name__ == "__main__":

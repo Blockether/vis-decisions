@@ -1,6 +1,6 @@
 # Vis Decisions
 
-Train Laya and GLiNER decision models with one Python environment and one Vis extension.
+Train Laya, GLiNER and Decision 2.0 decision models with one Python environment and one Vis extension.
 Keep your training rows local. Export verified FP32 inference bundles for Vis.
 
 ## When to use
@@ -18,12 +18,12 @@ Add the extension to your project `vis.yml`:
 extensions:
   vis-decisions:
     source: https://github.com/Blockether/vis-decisions
-    version: '0.1.0'
+    version: '0.2.0'
 ```
 
 Reload the project. The first installation downloads the pinned Python dependencies.
 Local training needs Python 3.12 or newer, enough memory, and space for complete model checkpoints.
-Decide-1B needs several gigabytes for each checkpoint or export.
+Decide-1B and Decision 2.0 need several gigabytes for each checkpoint or export.
 
 Ask Vis to show the decision models and their download sizes.
 Then ask it to train a selected checkpoint with your training and evaluation files.
@@ -51,7 +51,7 @@ Clone this repository. Install the locked environment:
 uv sync --frozen --python 3.12
 ```
 
-The same environment trains both families.
+The same environment trains all three families.
 It pins Transformers 5.17.0, GLiNER2 2.0.0, Laya 0.3.22 and PyTorch 2.14.0.
 The model releases contain weights and metadata, not Python dependency archives.
 
@@ -80,6 +80,9 @@ The loader verifies each file and selects the family from model provenance.
 Training rows and evaluation rows must be disjoint.
 Keep the output directory new for each run.
 
+Decision 2.0 has no action head. Its quality policy sets only `min_decision_accuracy`.
+Its validation report gives no action accuracy.
+
 The [Vis guide](https://github.com/Blockether/vis/blob/main/resources/vis-docs/decision-models.md#train-locally-with-the-python-sdk)
 explains the row formats, training settings and quality policy.
 The Python package also provides `Decisions(gateway)` for explicit gateway import and activation.
@@ -106,6 +109,10 @@ They use ordered parts of at most 2,000,000,000 bytes.
 The downloader verifies every part, joins them, and verifies the complete archive before extraction.
 No conversion to FP16, BF16 or quantized weights is used to reduce their size.
 
+To prepare the Decision 2.0 FP32 bundle from the upstream checkpoint, run `scripts/export_decision2.py`.
+To pack prepared bundles for the release, run `scripts/build_release.py`.
+It verifies each file, writes reproducible archives and prints their sizes and digests for the catalog.
+
 ## Development
 
 ```sh
@@ -119,4 +126,5 @@ uv build
 Most tests do not download model weights.
 To run the offline Laya acceptance tests, set `VIS_LAYA_TRAINING_DIR` to a verified complete checkpoint.
 To run the Decide-1B acceptance test, set `VIS_GLINER_DECIDE_1B_CHECKPOINT` and `VIS_GLINER_LICENSE`.
+To run the Decision 2.0 export test, set `VIS_DECISION2_CHECKPOINT` to the upstream checkpoint.
 The real-model tests cover train, stop, resume, export and reopening in a new process.

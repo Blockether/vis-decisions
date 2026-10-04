@@ -34,7 +34,7 @@ class TrainingOutcome:
     inference_bundle: str
     validation_report: str
     decision_accuracy: float
-    action_accuracy: float
+    action_accuracy: float | None
 
 
 @dataclass(frozen=True)
@@ -63,12 +63,12 @@ def _outcome(result) -> TrainingOutcome:
         str(result.inference_bundle),
         str(result.validation_report),
         report["decision_accuracy"],
-        report["action_accuracy"],
+        report.get("action_accuracy"),
     )
 
 
 class DecisionTools:
-    """Download verified checkpoints, train both families and export validated ONNX."""
+    """Download verified checkpoints, train every family and export validated ONNX."""
 
     def models(self) -> list[ModelInfo]:
         """Read the public Vis release catalog without downloading model weights."""
@@ -104,7 +104,7 @@ class DecisionTools:
         validation_policy: str,
         output_dir: str,
     ) -> TrainingOutcome:
-        """Train or resume a checkpoint, then validate and export both heads.
+        """Train or resume a checkpoint, then validate and export its heads.
 
         Rows stay local. Matching partial runs resume; new rows start from saved weights.
         Validation rows must be disjoint from training. No alias is activated.

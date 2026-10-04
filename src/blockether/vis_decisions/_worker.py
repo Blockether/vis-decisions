@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from ._models import ARCHITECTURES
+from ._models import ARCHITECTURES, DECISION2
 from ._publication import package
 from .api import Trainer, TrainingBundle
 
@@ -25,7 +25,7 @@ def _progress(event: dict) -> None:
 
 
 def run(spec_path: Path) -> None:
-    """Train both heads, export FP32, and record a digest only after success."""
+    """Train the model heads, export FP32, and record a digest only after success."""
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     if set(spec) != {
         "model_id",
@@ -40,7 +40,10 @@ def run(spec_path: Path) -> None:
     }:
         raise ValueError("Invalid decision training job description")
     model_id = spec["model_id"]
-    if model_id != "laya-typed-decisions" and model_id not in ARCHITECTURES:
+    if model_id != "laya-typed-decisions" and model_id not in {
+        *ARCHITECTURES,
+        *DECISION2,
+    }:
         raise ValueError("Unknown decision training model identity")
     _progress({"stage": "loading"})
     bundle = TrainingBundle.open(spec["checkpoint"])
@@ -70,7 +73,7 @@ def run(spec_path: Path) -> None:
         "sha256": digest,
         "bytes": size,
         "decision_accuracy": report["decision_accuracy"],
-        "action_accuracy": report["action_accuracy"],
+        "action_accuracy": report.get("action_accuracy"),
     }
     destination = Path(spec["result"])
     temporary = destination.with_suffix(".pending")

@@ -94,9 +94,10 @@ def test_remote_training_validates_local_filenames_and_preserves_gateway_failure
         "gliner2.5-decide",
         "gliner2.5-decide-1b",
         "gliner2.5-multi-decide",
+        "decision2.0-eos-0.8b",
     ],
 )
-def test_remote_training_explicit_gliner_family_and_resume(model_id):
+def test_remote_training_explicit_model_family_and_resume(model_id):
     previous = "28b15a56-014d-4c3d-9824-dc41edb6569a"
     current = "93b91cb4-ed9a-421b-a4cd-0d659ea2c510"
 

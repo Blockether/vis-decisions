@@ -10,10 +10,9 @@ from __future__ import annotations
 import gc
 import json
 import math
-import random
 import shutil
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -25,6 +24,8 @@ from ._trainer import (
     _fingerprint,
     _publish_checkpoint,
     _quality_report,
+    _Schedule,
+    _training_config,
 )
 from .training import _sha256
 
@@ -134,68 +135,6 @@ def _examples(source: str | Path) -> list[_Example]:
     if not rows:
         raise ValueError("Labeled examples cannot be empty")
     return rows
-
-
-def _training_config(source: str | Path) -> dict:
-    config = json.loads(Path(source).read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or set(config) - {
-        "epochs",
-        "max_steps",
-        "batch_size",
-        "encoder_lr",
-        "task_lr",
-        "seed",
-        "checkpoint_steps",
-    }:
-        raise ValueError("Unknown GLiNER training configuration option")
-    for name, lower, upper in (
-        ("epochs", 1, 100),
-        ("max_steps", 1, 100_000),
-        ("batch_size", 1, 32),
-        ("checkpoint_steps", 1, 100_000),
-    ):
-        value = config.get(name, 1)
-        if type(value) is not int or not lower <= value <= upper:
-            raise ValueError(f"Training {name} must be in [{lower},{upper}]")
-    for name in ("encoder_lr", "task_lr"):
-        value = config.get(name)
-        if (
-            type(value) not in (int, float)
-            or not math.isfinite(value)
-            or not 0 < value <= 0.01
-        ):
-            raise ValueError(f"Training {name} must be in (0,0.01]")
-    if type(config.get("seed", 42)) is not int:
-        raise ValueError("Training seed must be an integer")
-    return config
-
-
-class _Schedule:
-    """Seeded batch order; a resumed run skips the batches that it already trained."""
-
-    def __init__(self, count: int, config: dict) -> None:
-        self.count = count
-        self.batch = min(config.get("batch_size", 1), count)
-        # Like gliner2, drop an incomplete batch at the end of each pass.
-        self.per_pass = count // self.batch
-        self.total = config.get("max_steps", self.per_pass * config.get("epochs", 1))
-        self.seed = config.get("seed", 42)
-        self.done = 0
-
-    def __len__(self) -> int:
-        return (self.total - self.done) * self.batch
-
-    def __iter__(self) -> Iterator[int]:
-        generator = random.Random(self.seed)
-        start, stop = self.done * self.batch, self.total * self.batch
-        position = 0
-        while position < stop:
-            order = list(range(self.count))
-            generator.shuffle(order)
-            for index in order[: self.per_pass * self.batch]:
-                if start <= position < stop:
-                    yield index
-                position += 1
 
 
 def _extractor(

@@ -10,14 +10,22 @@ import pytest
 
 from scripts.build_release import inventory, pack
 
+_LAYA = {
+    "model.onnx": b"complete FP32 model graph",
+    "rl_agent_config.json": b"{}",
+    "tokenizer/tokenizer.json": b"{}",
+}
+_DECISION2 = {
+    "decision_config.json": b"{}",
+    "model.onnx": b"complete FP32 model graph",
+    "model.onnx.data": b"external FP32 weights",
+    "tokenizer/tokenizer.json": b"{}",
+    "tokenizer/tokenizer_config.json": b"{}",
+}
 
-def prepared_bundle(root):
+
+def prepared_bundle(root, payloads=_LAYA, **settings):
     root.mkdir()
-    payloads = {
-        "model.onnx": b"complete FP32 model graph",
-        "rl_agent_config.json": b"{}",
-        "tokenizer/tokenizer.json": b"{}",
-    }
     for name, data in payloads.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,6 +41,7 @@ def prepared_bundle(root):
             name: {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
             for name, data in payloads.items()
         },
+        **settings,
     }
     (root / "PROVENANCE.json").write_text(json.dumps(provenance))
     return root
@@ -77,6 +86,18 @@ def test_refuses_symlinks_and_non_fp32_graphs(tmp_path):
     path.write_text(json.dumps(provenance))
     with pytest.raises(ValueError, match="FP32"):
         pack(source, tmp_path / "bad.zip")
+
+
+def test_decision2_bundle_needs_its_settings_and_external_weights(tmp_path):
+    source = prepared_bundle(tmp_path / "source", _DECISION2, family="decision2")
+    assert "model.onnx.data" in [name for name, _ in inventory(source)]
+    incomplete = {k: v for k, v in _DECISION2.items() if k != "model.onnx.data"}
+    source = prepared_bundle(tmp_path / "incomplete", incomplete, family="decision2")
+    with pytest.raises(ValueError, match="required file"):
+        inventory(source)
+    source = prepared_bundle(tmp_path / "unknown", _DECISION2, family="unknown")
+    with pytest.raises(ValueError, match="Unknown model family"):
+        inventory(source)
 
 
 def test_release_builder_rejects_dependency_archives(tmp_path):

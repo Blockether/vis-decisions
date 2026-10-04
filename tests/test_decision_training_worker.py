@@ -117,9 +117,10 @@ def test_worker_failure_leaves_no_success_descriptor(tmp_path, monkeypatch):
         "gliner2.5-decide",
         "gliner2.5-decide-1b",
         "gliner2.5-multi-decide",
+        "decision2.0-eos-0.8b",
     ],
 )
-def test_worker_selects_and_preserves_gliner_checkpoint_identity(
+def test_worker_selects_and_preserves_checkpoint_identity(
     tmp_path, monkeypatch, capsys, model_id
 ):
 
@@ -140,6 +141,8 @@ def test_worker_selects_and_preserves_gliner_checkpoint_identity(
         )
     )
     opened = []
+    # Decision 2.0 has no action head, so its report has no action accuracy.
+    actions = None if model_id.startswith("decision2") else 0.8
 
     class FakeBundle:
         @classmethod
@@ -170,7 +173,7 @@ def test_worker_selects_and_preserves_gliner_checkpoint_identity(
             (output / "checkpoint" / "model.safetensors").write_bytes(b"private")
             report = output / "validation_report.json"
             report.write_text(
-                json.dumps({"decision_accuracy": 0.9, "action_accuracy": 0.8})
+                json.dumps({"decision_accuracy": 0.9, "action_accuracy": actions})
             )
             return type(
                 "Result",
@@ -189,7 +192,9 @@ def test_worker_selects_and_preserves_gliner_checkpoint_identity(
     monkeypatch.setattr(_worker, "package", fake_package)
     _worker.run(spec)
     assert opened == [tmp_path / "approved-checkpoint"]
-    assert json.loads((tmp_path / "result.json").read_text())["sha256"] == "a" * 64
+    result = json.loads((tmp_path / "result.json").read_text())
+    assert result["sha256"] == "a" * 64
+    assert result["action_accuracy"] == actions
     assert [
         json.loads(line)["stage"] for line in capsys.readouterr().out.splitlines()
     ] == ["loading", "training", "training", "publishing", "completed"]
