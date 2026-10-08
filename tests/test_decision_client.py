@@ -192,3 +192,75 @@ def test_decision_model_catalog_uses_gateway_auth_and_preserves_separate_states(
             == "Bearer test-credential"
             for call in requests
         )
+
+
+def test_decisions_infer_reaches_openai_models_through_the_same_contract():
+    def respond(method, path, body):
+        if result := compatible(method, path, body):
+            return result
+        if (method, path) == ("GET", "/v1/decisions/models"):
+            return 200, {
+                "models": [
+                    {
+                        "model_ref": "openai/gpt-6-luna",
+                        "provider": "openai",
+                        "residency": "remote",
+                        "available": True,
+                    }
+                ]
+            }
+        assert (method, path) == ("POST", "/v1/systemone")
+        request = json.loads(body)
+        assert request == {
+            "model": "openai/gpt-6-luna",
+            "state": "A damaged item needs a refund",
+            "questions": {
+                "intent": {
+                    "type": "choice",
+                    "instructions": "Choose a request",
+                    "criteria": ["refund", "repair"],
+                },
+                "private": {"type": "noul", "instructions": "Is this private?"},
+            },
+        }
+        return 200, {
+            "model": "gpt-6-luna",
+            "routing": {
+                "model": request["model"],
+                "model_ref": request["model"],
+                "provider": "openai",
+            },
+            "answers": {
+                "intent": {
+                    "type": "choice",
+                    "choice": "refund",
+                    "probabilities": {"refund": 0.9, "repair": 0.1},
+                    "confidence": 0.9,
+                },
+                "private": {"type": "refusal"},
+            },
+            "usage": {"input_tokens": 30, "output_tokens": 2},
+        }
+
+    with endpoint(respond) as (url, _calls):
+        with GatewayClient(url, token="test-credential") as client:
+            decisions = Decisions(client)
+            [row] = decisions.list_models()
+            assert row["model_ref"] == "openai/gpt-6-luna" and row["available"]
+            assert "installed" not in row
+            result = decisions.infer(
+                model="openai/gpt-6-luna",
+                state="A damaged item needs a refund",
+                questions={
+                    "intent": {
+                        "type": "choice",
+                        "instructions": "Choose a request",
+                        "criteria": ["refund", "repair"],
+                    },
+                    "private": {"type": "noul", "instructions": "Is this private?"},
+                },
+            )
+    assert result["routing"]["provider"] == "openai"
+    assert result["answers"]["intent"]["choice"] == "refund"
+    assert "action" not in result["answers"]["intent"]
+    assert result["answers"]["private"] == {"type": "refusal"}

@@ -8,6 +8,7 @@ Keep your training rows local. Export verified FP32 inference bundles for Vis.
 - To train from chat, [enable the extension](#use-in-vis).
 - To train from Python, [open a complete checkpoint](#train-with-python).
 - To continue an interrupted run, [resume a saved checkpoint](#resume-or-continue-training).
+- To classify with OpenAI's GPT-6 Luna instead of a local model, [ask an OpenAI decision model](#ask-openai-decision-models).
 - To select a model or configure live decisions, use the [Vis decision-model guide](https://github.com/Blockether/vis/blob/main/resources/vis-docs/decision-models.md).
 
 ## Use in Vis
@@ -42,6 +43,27 @@ The extension exposes these tools:
 
 Training, export and packaging do not publish a model or activate an alias.
 Review the validation report before importing the model into a gateway.
+
+## Ask OpenAI decision models
+
+The `Decisions` client also reaches OpenAI classifier models, such as GPT-6 Luna, through your gateway.
+Use the same questions and the same answer shapes as for a local model.
+Name the model as `openai/<id>`:
+
+```python
+answer = decisions.infer(
+    model="openai/gpt-6-luna",
+    state="A damaged item needs a refund",
+    questions={"intent": {"type": "choice", "instructions": "Choose a request", "criteria": ["refund", "repair"]}},
+)
+print(answer["answers"]["intent"]["choice"], answer["routing"]["provider"])  # refund openai
+```
+
+The gateway needs an OpenAI API key, from the `openai` provider or `OPENAI_API_KEY`.
+A ChatGPT (Codex) sign-in does not work with the OpenAI Decisions API.
+`decisions.list_models()` shows `"available": true` when the gateway has a key.
+OpenAI answers have no `action` head. If OpenAI declines a question, its answer is `{"type": "refusal"}`.
+Each request is a paid OpenAI call, and the state goes to OpenAI.
 
 ## Train with Python
 

@@ -48,6 +48,12 @@ class Decisions:
         the selected model and ``routing.model`` fields. Baseline action probabilities
         are not approved for autonomous execution.
 
+        ``model="openai/<id>"``, for example ``openai/gpt-6-luna``, sends the same
+        questions to the OpenAI Decisions API through the gateway. The gateway needs an
+        OpenAI API key; a ChatGPT (Codex) sign-in does not work. These answers have no
+        ``action`` head, ``routing.provider`` is ``"openai"``, and a declined question
+        has ``{"type": "refusal"}``.
+
         GLiNER counts the state, instructions, criteria and structural tokens for
         each question against the installed encoder limit. It never truncates input.
         Overlong input raises ``GatewayError`` with code ``input-too-long``,
