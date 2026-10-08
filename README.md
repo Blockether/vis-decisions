@@ -54,9 +54,16 @@ Name the model as `openai/<id>`:
 answer = decisions.infer(
     model="openai/gpt-6-luna",
     state="A damaged item needs a refund",
-    questions={"intent": {"type": "choice", "instructions": "Choose a request", "criteria": ["refund", "repair"]}},
+    questions={
+        "intent": {
+            "type": "choice",
+            "instructions": "Choose a request",
+            "criteria": ["refund", "repair"],
+        }
+    },
 )
-print(answer["answers"]["intent"]["choice"], answer["routing"]["provider"])  # refund openai
+# Prints: refund openai
+print(answer["answers"]["intent"]["choice"], answer["routing"]["provider"])
 ```
 
 The gateway needs an OpenAI API key, from the `openai` provider or `OPENAI_API_KEY`.
