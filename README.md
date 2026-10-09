@@ -19,7 +19,7 @@ Add the extension to your project `vis.yml`:
 extensions:
   vis-decisions:
     source: https://github.com/Blockether/vis-decisions
-    version: '0.3.1'
+    version: '0.4.0'
 ```
 
 Reload the project. The first installation downloads the pinned Python dependencies.
