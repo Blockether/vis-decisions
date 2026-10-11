@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 from ._trainer import (
     TrainingResult,
     _config,
+    _device,
+    _device_errors,
     _export_fp32,
     _fingerprint,
     _publish_checkpoint,
@@ -28,6 +30,7 @@ from ._trainer import (
     _Schedule,
     _threads,
     _training_config,
+    _with_lora,
 )
 from .training import _sha256
 
@@ -173,12 +176,20 @@ class Decision2Trainer:
         gc.collect()
         self._closed = True
 
-    def _encode(self, rows: list[_Example]) -> list[dict[str, Any]]:
-        """Check the token limit of every row before any slow step starts."""
+    def _encode(
+        self, rows: list[_Example], max_length: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Check the token limit of every row before any slow step starts.
+
+        With ``max_length``, the end of a long state is cut until the row fits.
+        """
         encoded = []
         for number, row in enumerate(rows, 1):
             try:
-                encoded.append(self._exporter.encode(row.prompt, self._tokenizer))
+                prompt = row.prompt
+                if max_length is not None:
+                    prompt = self._exporter.fit(prompt, self._tokenizer, max_length)
+                encoded.append(self._exporter.encode(prompt, self._tokenizer))
             except ValueError as error:
                 raise ValueError(f"Invalid labeled example {number}: {error}") from None
         return encoded
@@ -292,13 +303,21 @@ class Decision2Trainer:
         save: Callable[[Any, int], Path],
         progress: Callable[[dict], None] | None,
     ) -> Path:
-        """Train the backbone and the head; the optimizer state ends with this call."""
+        """Train the backbone and the head; the optimizer state ends with this call.
+
+        With ``lora``, only adapters train in the backbone; the head trains fully.
+        """
         torch = self._torch
+        device = _device(torch, config.get("device", "auto"))
         torch.manual_seed(config.get("seed", 42))
+        if "lora" in config:
+            model.backbone = _with_lora(model.backbone, config["lora"])
+        model.to(device)
         model.train()
+        backbone = [item for item in model.backbone.parameters() if item.requires_grad]
         optimizer = torch.optim.AdamW(
             [
-                {"params": model.backbone.parameters(), "lr": config["encoder_lr"]},
+                {"params": backbone, "lr": config["encoder_lr"]},
                 {"params": model.head.parameters(), "lr": config["task_lr"]},
             ]
         )
@@ -312,28 +331,41 @@ class Decision2Trainer:
                     "stage": "training",
                     "step": schedule.done,
                     "max_steps": schedule.total,
+                    "device": device.type,
                 }
             )
         for step in range(schedule.done + 1, schedule.total + 1):
             batch = [next(order) for _ in range(schedule.batch)]
-            arguments = self._exporter.collate([encoded[index] for index in batch])
-            counts = torch.tensor(
-                [len(encoded[index]["candidate_positions"]) for index in batch]
-            )
-            logits = model(*arguments)
-            valid = torch.arange(logits.shape[1])[None, :] < counts[:, None]
-            loss = torch.nn.functional.cross_entropy(
-                logits.masked_fill(~valid, float("-inf")),
-                torch.tensor([rows[index].target for index in batch]),
-            )
-            if not math.isfinite(loss.item()):
-                raise ValueError(
-                    "Decision 2.0 training did not complete with finite loss"
+            arguments = [
+                tensor.to(device)
+                for tensor in self._exporter.collate(
+                    [encoded[index] for index in batch]
                 )
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            ]
+            counts = torch.tensor(
+                [len(encoded[index]["candidate_positions"]) for index in batch],
+                device=device,
+            )
+            with _device_errors(device):
+                logits = model(*arguments)
+                valid = (
+                    torch.arange(logits.shape[1], device=device)[None, :]
+                    < counts[:, None]
+                )
+                loss = torch.nn.functional.cross_entropy(
+                    logits.masked_fill(~valid, float("-inf")),
+                    torch.tensor(
+                        [rows[index].target for index in batch], device=device
+                    ),
+                )
+                if not math.isfinite(loss.item()):
+                    raise ValueError(
+                        "Decision 2.0 training did not complete with finite loss"
+                    )
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
             if progress and (
                 step == schedule.done + 1
                 or step % interval == 0
@@ -346,6 +378,7 @@ class Decision2Trainer:
                         "max_steps": schedule.total,
                         "epoch": round(step / schedule.per_pass, 4),
                         "loss": loss.item(),
+                        "device": device.type,
                     }
                 )
             if step == schedule.total or (every and step % every == 0):
@@ -364,7 +397,11 @@ class Decision2Trainer:
     ) -> TrainingResult:
         """Train the backbone and head, keep resumable checkpoints and publish FP32.
 
-        ``progress`` receives the step, ``max_steps``, epoch and loss about once per
+        The configuration ``device`` (``auto``, ``cpu``, ``mps`` or ``cuda``) selects
+        the FP32 training device; checkpoints, export and validation use the CPU.
+        ``lora`` trains low-rank adapters that each checkpoint merges into full
+        weights. ``max_input_tokens`` cuts long training states to fit.
+        ``progress`` receives the step, ``max_steps``, epoch, loss and device about once per
         percent of the run. With ``checkpoint_steps``, ``output_dir/checkpoint`` keeps
         the latest partial checkpoint when training fails or stops. Training that
         checkpoint with the same rows and settings resumes at its saved step.
@@ -374,12 +411,19 @@ class Decision2Trainer:
         rows, evaluation = _examples(train_data), _examples(eval_data)
         if {_identity(row) for row in rows} & {_identity(row) for row in evaluation}:
             raise ValueError("Training and evaluation examples must be disjoint")
-        config = _training_config(training_config)
+        config = _training_config(training_config, tokens=True)
+        limit = config.get("max_input_tokens")
+        if limit is not None and limit > self._exporter.MAX_INPUT_TOKENS:
+            raise ValueError(
+                "Training max_input_tokens exceeds the "
+                f"{self._exporter.MAX_INPUT_TOKENS} token limit of Decision 2.0"
+            )
+        device = _device(self._torch, config.get("device", "auto"))
         policy = _config(validation_policy, kind="quality policy", actions=False)
         target = Path(output_dir).expanduser().resolve()
         if target.exists():
             raise FileExistsError(target)
-        encoded, held_out = self._encode(rows), self._encode(evaluation)
+        encoded, held_out = self._encode(rows, limit), self._encode(evaluation)
         target.parent.mkdir(parents=True, exist_ok=True)
         from .decision2_training import Decision2TrainingBundle
 
@@ -395,6 +439,11 @@ class Decision2Trainer:
                 "encoder_lr": config["encoder_lr"],
                 "task_lr": config["task_lr"],
                 "seed": config.get("seed", 42),
+                **{
+                    name: config[name]
+                    for name in ("lora", "max_input_tokens")
+                    if name in config
+                },
             },
             ([row.prompt, row.target] for row in rows),
         )
@@ -437,7 +486,11 @@ class Decision2Trainer:
                 return _publish_checkpoint(
                     pending,
                     target,
-                    {"steps": step, "max_steps": schedule.total},
+                    {
+                        "steps": step,
+                        "max_steps": schedule.total,
+                        "device": device.type,
+                    },
                     progress,
                 )
 

@@ -32,6 +32,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
 )
 
 from ._models import DECISION2, DECISION2_BACKBONES, DECISION2_PROMPT_VERSION
+from ._trainer import _cpu_state
 from .decision2_training import _checkpoint_model
 from .training import _inventory, _sha256
 
@@ -120,10 +121,10 @@ def segments(row: Mapping[str, Any]) -> tuple[str, list[str], str]:
     return prefix, options, suffix
 
 
-def encode(
-    row: Mapping[str, Any], tokenizer: Tokenizer, max_length: int = MAX_INPUT_TOKENS
-) -> dict[str, Any]:
-    """Tokenize each segment without special tokens; never truncate."""
+def _tokens(
+    row: Mapping[str, Any], tokenizer: Tokenizer
+) -> tuple[list[int], list[int]]:
+    """Tokenize each segment without special tokens; return IDs and option endpoints."""
     prefix, options, suffix = segments(row)
     ids = list(tokenizer.encode(prefix, add_special_tokens=False).ids)
     endpoints = []
@@ -134,6 +135,14 @@ def encode(
         ids.extend(part)
         endpoints.append(len(ids) - 1)
     ids.extend(tokenizer.encode(suffix, add_special_tokens=False).ids)
+    return ids, endpoints
+
+
+def encode(
+    row: Mapping[str, Any], tokenizer: Tokenizer, max_length: int = MAX_INPUT_TOKENS
+) -> dict[str, Any]:
+    """Tokenize each segment without special tokens; never truncate."""
+    ids, endpoints = _tokens(row, tokenizer)
     if len(ids) > max_length:
         raise ValueError(f"{len(ids)} tokens exceed the {max_length} token limit")
     return {
@@ -142,6 +151,34 @@ def encode(
         "query_position": len(ids) - 1,
         "token_ids_sha256": hashlib.sha256(canonical(ids).encode("utf-8")).hexdigest(),
     }
+
+
+def fit(
+    row: Mapping[str, Any], tokenizer: Tokenizer, max_length: int
+) -> Mapping[str, Any]:
+    """Cut the end of the state text until the prompt has at most ``max_length`` tokens.
+
+    The prompt structure, the instructions and every option stay complete.
+    """
+    return _fit_state(row, max_length, lambda value: len(_tokens(value, tokenizer)[0]))
+
+
+def _fit_state(row, max_length, count):
+    if count(row) <= max_length:
+        return row
+    text = _payload(row["state"])
+    if count({**row, "state": ""}) > max_length:
+        raise ValueError(
+            f"The prompt without its state exceeds the {max_length} token limit"
+        )
+    low, high = 0, len(text)
+    while high - low > 1:
+        middle = (low + high) // 2
+        if count({**row, "state": text[:middle]}) <= max_length:
+            low = middle
+        else:
+            high = middle
+    return {**row, "state": text[:low]}
 
 
 class CandidateHead(torch.nn.Module):
@@ -386,17 +423,16 @@ def make_batch(
 def save_checkpoint(
     model: Decision2Model, source: str | Path, destination: str | Path
 ) -> Path:
-    """Save full FP32 weights with the settings and tokenizer of ``source``."""
+    """Save full FP32 CPU weights with the settings and tokenizer of ``source``.
+
+    LoRA adapters are merged into the saved weights; the model in memory is unchanged.
+    """
     source, destination = Path(source), Path(destination)
     destination.mkdir(parents=True)
-    model.backbone.save_pretrained(destination / "backbone")
-    save_file(
-        {
-            name: tensor.detach().contiguous()
-            for name, tensor in model.head.state_dict().items()
-        },
-        str(destination / "decision_head.safetensors"),
+    model.backbone.save_pretrained(
+        destination / "backbone", state_dict=_cpu_state(model.backbone)
     )
+    save_file(_cpu_state(model.head), str(destination / "decision_head.safetensors"))
     for name in ("decision_config.json", "tokenizer.json", "tokenizer_config.json"):
         shutil.copyfile(source / name, destination / name)
     return destination

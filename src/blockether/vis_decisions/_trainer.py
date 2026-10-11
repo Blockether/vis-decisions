@@ -8,6 +8,7 @@ run can resume.
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import hashlib
 import json
@@ -43,6 +44,121 @@ def _threads(torch: Any) -> int:
         return threads
     usable = getattr(os, "process_cpu_count", os.cpu_count)() or threads
     return max(1, min(threads, usable))
+
+
+DEVICES = ("auto", "cpu", "mps", "cuda")
+_LORA_TARGETS = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+
+
+def _device(torch: Any, name: str = "auto") -> Any:
+    """Resolve the FP32 training device. Export and validation always stay on the CPU.
+
+    ``auto`` uses CUDA, then Apple MPS, then the CPU.
+    """
+    if name not in DEVICES:
+        raise ValueError("Training device must be auto, cpu, mps or cuda")
+    cuda = torch.cuda.is_available()
+    mps = torch.backends.mps.is_available()
+    if name == "auto":
+        name = "cuda" if cuda else "mps" if mps else "cpu"
+    elif name == "cuda" and not cuda:
+        raise ValueError("Training device cuda is not available in this PyTorch build")
+    elif name == "mps" and not mps:
+        raise ValueError(
+            "Training device mps is not available: it needs Apple silicon, macOS 12.3 "
+            "or later and a PyTorch build with MPS"
+        )
+    return torch.device(name)
+
+
+@contextlib.contextmanager
+def _device_errors(device: Any) -> Iterator[None]:
+    """Replace an unsupported MPS operation with an error that names the two fixes."""
+    try:
+        yield
+    except NotImplementedError as error:
+        if getattr(device, "type", None) != "mps":
+            raise
+        raise RuntimeError(
+            f"PyTorch MPS does not support an operation of this model ({error}). "
+            "Set PYTORCH_ENABLE_MPS_FALLBACK=1 before the trainer process starts, "
+            'or set "device": "cpu" in the training configuration.'
+        ) from error
+
+
+def _lora_settings(value: object) -> dict:
+    """Validate ``{"rank", "alpha", "dropout"}``; alpha defaults to two times rank."""
+    if (
+        not isinstance(value, dict)
+        or "rank" not in value
+        or set(value) - {"rank", "alpha", "dropout"}
+    ):
+        raise ValueError("Training lora needs rank, and accepts only alpha and dropout")
+    rank = value["rank"]
+    if type(rank) is not int or not 1 <= rank <= 256:
+        raise ValueError("Training lora rank must be in [1,256]")
+    alpha = value.get("alpha", 2 * rank)
+    if (
+        type(alpha) not in (int, float)
+        or not math.isfinite(alpha)
+        or not 0 < alpha <= 4096
+    ):
+        raise ValueError("Training lora alpha must be in (0,4096]")
+    dropout = value.get("dropout", 0.0)
+    if type(dropout) not in (int, float) or not 0 <= dropout < 1:
+        raise ValueError("Training lora dropout must be in [0,1)")
+    return {"rank": rank, "alpha": float(alpha), "dropout": float(dropout)}
+
+
+def _with_lora(module: Any, settings: dict) -> Any:
+    """Add LoRA adapters to the linear layers of ``module`` and freeze its other weights."""
+    from peft import LoraConfig, inject_adapter_in_model
+
+    names = {name.rsplit(".", 1)[-1] for name, _ in module.named_modules()}
+    targets = sorted(names & set(_LORA_TARGETS))
+    if not targets:
+        raise ValueError("This backbone has no linear layers that accept LoRA")
+    module = inject_adapter_in_model(
+        LoraConfig(
+            r=settings["rank"],
+            lora_alpha=settings["alpha"],
+            lora_dropout=settings["dropout"],
+            target_modules=targets,
+        ),
+        module,
+    )
+    for name, parameter in module.named_parameters():
+        parameter.requires_grad_("lora_" in name)
+    return module
+
+
+def _cpu_state(module: Any) -> dict:
+    """Return full CPU weights of ``module``; LoRA adapters are merged, never saved."""
+    from peft.tuners.lora import LoraLayer
+
+    merged = {}
+    for name, layer in module.named_modules():
+        if isinstance(layer, LoraLayer):
+            delta = layer.get_delta_weight("default")
+            merged[f"{name}.base_layer.weight"] = layer.base_layer.weight + delta
+    state = {}
+    for key, tensor in module.state_dict().items():
+        if ".lora_" in key:
+            continue
+        value = merged.get(key, tensor)
+        state[key.replace(".base_layer.", ".")] = value.detach().cpu().contiguous()
+    return state
 
 
 def _examples(source: str | Path) -> list[dict]:
@@ -107,8 +223,11 @@ def _config(source: str | Path, *, kind: str, actions: bool = True) -> dict:
             "seed",
             "max_steps",
             "checkpoint_steps",
+            "device",
         }:
             raise ValueError("Unknown training configuration option")
+        if config.get("device", "auto") not in DEVICES:
+            raise ValueError("Training device must be auto, cpu, mps or cuda")
         epochs = config.get("epochs")
         rate = config.get("learning_rate")
         if type(epochs) is not int or not 1 <= epochs <= 100:
@@ -136,9 +255,10 @@ def _config(source: str | Path, *, kind: str, actions: bool = True) -> dict:
     return config
 
 
-def _training_config(source: str | Path) -> dict:
+def _training_config(source: str | Path, *, tokens: bool = False) -> dict:
+    """Validate a gliner2-style configuration; ``tokens`` allows ``max_input_tokens``."""
     config = json.loads(Path(source).read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or set(config) - {
+    names = {
         "epochs",
         "max_steps",
         "batch_size",
@@ -146,8 +266,22 @@ def _training_config(source: str | Path) -> dict:
         "task_lr",
         "seed",
         "checkpoint_steps",
-    }:
+        "device",
+        "lora",
+    }
+    if tokens:
+        names.add("max_input_tokens")
+    if not isinstance(config, dict) or set(config) - names:
         raise ValueError("Unknown training configuration option")
+    if config.get("device", "auto") not in DEVICES:
+        raise ValueError("Training device must be auto, cpu, mps or cuda")
+    if "lora" in config:
+        config["lora"] = _lora_settings(config["lora"])
+    if "max_input_tokens" in config and (
+        type(config["max_input_tokens"]) is not int
+        or not 64 <= config["max_input_tokens"] <= 32_768
+    ):
+        raise ValueError("Training max_input_tokens must be in [64,32768]")
     for name, lower, upper in (
         ("epochs", 1, 100),
         ("max_steps", 1, 100_000),
@@ -303,7 +437,10 @@ def _publish_checkpoint(
 
 
 class ModernBertTrainer:
-    """Explicit CPU training. An ONNX inference bundle is never a checkpoint.
+    """Explicit FP32 training. An ONNX inference bundle is never a checkpoint.
+
+    The training configuration ``device`` selects ``auto``, ``cpu``, ``mps`` or
+    ``cuda``. Checkpoints, export and validation always run on the CPU.
 
     Each JSONL row contains ``state``, one Laya ``question``, an integer
     ``target`` option index and ``action`` (0=act, 1=escalate). Evaluation rows
@@ -333,7 +470,7 @@ class ModernBertTrainer:
         self.close()
 
     def close(self) -> None:
-        """Release the CPU model and its native tensor storage."""
+        """Release the model and its native tensor storage."""
         if not self._closed:
             self.agent = None
             gc.collect()
@@ -356,7 +493,11 @@ class ModernBertTrainer:
         directory.mkdir(parents=True)
         exporter = self._exporter
         exporter.save_file(
-            self.agent.model.state_dict(), str(directory / "model.safetensors")
+            {
+                name: tensor.detach().cpu()
+                for name, tensor in self.agent.model.state_dict().items()
+            },
+            str(directory / "model.safetensors"),
         )
         (directory / "rl_agent_config.json").write_text(
             json.dumps(self.agent.cfg, indent=2)
@@ -553,6 +694,7 @@ class ModernBertTrainer:
         interval = max(1, total // 100)
         model = self.agent.model
         torch = self._torch
+        device = _device(torch, config.get("device", "auto"))
         torch.manual_seed(config.get("seed", 42))
         train_encoder = config.get("train_encoder", False)
         for parameter in model.encoder.parameters():
@@ -562,6 +704,7 @@ class ModernBertTrainer:
         ]
         optimizer = torch.optim.AdamW(parameters, lr=config["learning_rate"])
         losses = []
+        model.to(device)
         model.train()
         try:
             with tempfile.TemporaryDirectory(
@@ -587,6 +730,7 @@ class ModernBertTrainer:
                         {
                             "steps": step,
                             "max_steps": total,
+                            "device": device.type,
                             "initial_loss": losses[0],
                             "final_loss": losses[-1],
                         },
@@ -594,24 +738,32 @@ class ModernBertTrainer:
                     )
 
                 if progress:
-                    progress({"stage": "training", "step": done, "max_steps": total})
+                    progress(
+                        {
+                            "stage": "training",
+                            "step": done,
+                            "max_steps": total,
+                            "device": device.type,
+                        }
+                    )
                 for step in range(done + 1, total + 1):
                     row = rows[(step - 1) % len(rows)]
-                    batch = self._batch(row)
+                    batch = [tensor.to(device) for tensor in self._batch(row)]
                     optimizer.zero_grad(set_to_none=True)
-                    logits, action_logits = model(*batch)
-                    loss = torch.nn.functional.cross_entropy(
-                        logits, torch.tensor([row["target"]])
-                    ) + torch.nn.functional.cross_entropy(
-                        action_logits, torch.tensor([row["action"]])
-                    )
-                    if not torch.isfinite(loss):
-                        raise ValueError("Training produced a non-finite loss")
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        parameters, 1.0, error_if_nonfinite=True
-                    )
-                    optimizer.step()
+                    with _device_errors(device):
+                        logits, action_logits = model(*batch)
+                        loss = torch.nn.functional.cross_entropy(
+                            logits, torch.tensor([row["target"]], device=device)
+                        ) + torch.nn.functional.cross_entropy(
+                            action_logits, torch.tensor([row["action"]], device=device)
+                        )
+                        if not torch.isfinite(loss):
+                            raise ValueError("Training produced a non-finite loss")
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            parameters, 1.0, error_if_nonfinite=True
+                        )
+                        optimizer.step()
                     losses.append(float(loss.detach()))
                     if progress and (
                         step == done + 1 or step % interval == 0 or step == total
@@ -623,11 +775,13 @@ class ModernBertTrainer:
                                 "max_steps": total,
                                 "epoch": round(step / len(rows), 4),
                                 "loss": losses[-1],
+                                "device": device.type,
                             }
                         )
                     if every and step % every == 0 and step < total:
                         save(step)
                 optimizer.zero_grad(set_to_none=True)
+                model.to("cpu")
                 model.eval()
                 checkpoint = save(total)
             if progress:
@@ -648,6 +802,7 @@ class ModernBertTrainer:
         finally:
             optimizer.zero_grad(set_to_none=True)
             del optimizer
+            model.to("cpu")
             gc.collect()
 
 

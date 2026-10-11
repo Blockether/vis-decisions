@@ -16,6 +16,7 @@ import pytest
 import torch
 from gliner2.training.data import Classification, InputExample
 from gliner2.training.trainer import ExtractorCollator, ExtractorTrainer, TrainingConfig
+from safetensors.torch import load_file
 
 from blockether.vis_decisions._gliner import (
     ARCHITECTURES,
@@ -26,6 +27,8 @@ from blockether.vis_decisions._gliner import (
     prepare_fp32,
     validate_graph,
 )
+from blockether.vis_decisions._gliner_trainer import _extractor
+from blockether.vis_decisions._trainer import _Schedule
 
 MODEL_IDS = ("gliner2.5-base", "gliner2.5-decide")
 LICENSE = Path(__file__).resolve().parents[1] / "LICENSE"
@@ -152,4 +155,61 @@ def test_one_training_step_saves_reloadable_fp32_export(model_id):
         assert (
             validate_graph(reloaded, root / "inference" / "model.onnx")["examples"] == 3
         )
+        assert np.isfinite(make_batch(reloaded, *PROBES[0])[0].numpy()).all()
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+def test_lora_training_saves_full_merged_weights(device):
+    # Regression for #366: gliner2 saved only the LoRA adapter of its PeftModel.
+    if device == "mps" and not torch.backends.mps.is_available():
+        pytest.skip("Apple MPS is not available")
+    torch.set_num_threads(4)
+    source = _checkpoint(MODEL_IDS[0])
+    with TemporaryDirectory(prefix="gliner-lora-") as directory:
+        root = Path(directory)
+        model = load_checkpoint(source, model_id=MODEL_IDS[0])
+        example = InputExample(
+            text="Please refund my order",
+            classifications=[
+                Classification(
+                    task="intent", labels=["refund", "other"], true_label="refund"
+                )
+            ],
+        )
+        config = TrainingConfig(
+            output_dir=str(root / "training"),
+            max_steps=2,
+            batch_size=1,
+            num_workers=0,
+            eval_strategy="no",
+            scheduler_type="constant",
+            encoder_lr=1e-3,
+            task_lr=1e-3,
+            fp16=False,
+            bf16=False,
+            use_lora=True,
+            lora_r=4,
+            lora_alpha=8,
+            save_adapter_only=False,
+        )
+        trainer = _extractor(
+            ExtractorTrainer,
+            _Schedule(1, {"max_steps": 2}),
+            lambda *_: None,
+            torch.device(device),
+        )
+        assert trainer(model, config).train([example])["total_steps"] == 2
+        del model
+        gc.collect()
+        final = root / "training" / "final"
+        base = load_file(source / "model.safetensors")
+        trained = load_file(final / "model.safetensors")
+        assert trained.keys() == base.keys()
+        assert all(value.dtype == torch.float32 for value in trained.values())
+        changed = {
+            name for name in base if not torch.equal(base[name].float(), trained[name])
+        }
+        assert any(name.startswith("encoder.") for name in changed)
+        assert not any("embeddings" in name for name in changed)
+        reloaded = load_checkpoint(final, model_id=MODEL_IDS[0])
         assert np.isfinite(make_batch(reloaded, *PROBES[0])[0].numpy()).all()

@@ -649,7 +649,10 @@ def install_fake_gliner2(monkeypatch) -> None:
     trainer = ModuleType("gliner2.training.trainer")
     trainer.ExtractorDataset = FakeDataset
     trainer.ExtractorTrainer = FakeExtractorTrainer
-    trainer.TrainingConfig = SimpleNamespace
+    # Like the gliner2 TrainingConfig, LoRA is off unless the settings turn it on.
+    trainer.TrainingConfig = lambda **settings: SimpleNamespace(
+        **{"use_lora": False, **settings}
+    )
     for module in (
         ModuleType("gliner2"),
         ModuleType("gliner2.training"),
@@ -719,7 +722,7 @@ def training_inputs(root: Path, states: list[str], **settings) -> dict:
             )
         )
     (root / "config.json").write_text(
-        json.dumps({"encoder_lr": 1e-5, "task_lr": 5e-4, **settings})
+        json.dumps({"encoder_lr": 1e-5, "task_lr": 5e-4, "device": "cpu", **settings})
     )
     (root / "policy.json").write_text(
         '{"min_decision_accuracy": 0.0, "min_action_accuracy": 0.0}'
@@ -773,8 +776,15 @@ def test_gliner_training_reports_steps_and_resumes_a_partial_checkpoint(
         **inputs, output_dir=tmp_path / "reference", progress=events.append
     )
     assert events[:2] == [
-        {"stage": "training", "step": 0, "max_steps": 250},
-        {"stage": "training", "step": 1, "max_steps": 250, "epoch": 0.2, "loss": 0.5},
+        {"stage": "training", "step": 0, "max_steps": 250, "device": "cpu"},
+        {
+            "stage": "training",
+            "step": 1,
+            "max_steps": 250,
+            "epoch": 0.2,
+            "loss": 0.5,
+            "device": "cpu",
+        },
     ]
     assert steps(events, "training") == [0, 1, *range(2, 251, 2)]
     assert steps(events, "checkpoint_saved") == [100, 200, 250]
@@ -793,6 +803,7 @@ def test_gliner_training_reports_steps_and_resumes_a_partial_checkpoint(
     assert json.loads((tmp_path / "reference/training_report.json").read_text()) == {
         "steps": 250,
         "max_steps": 250,
+        "device": "cpu",
         "status": "checkpoint_saved",
     }
     assert reference.inference_bundle.is_dir()
@@ -811,6 +822,7 @@ def test_gliner_training_reports_steps_and_resumes_a_partial_checkpoint(
     assert json.loads((stopped / "training_report.json").read_text()) == {
         "steps": 100,
         "max_steps": 250,
+        "device": "cpu",
         "status": "partial",
     }
     partial = provenance(stopped / "checkpoint")
@@ -875,7 +887,12 @@ def test_gliner_training_continues_a_checkpoint_on_new_data_from_step_zero(
     result = fake_trainer(saved, batches).finetune(
         **inputs, output_dir=tmp_path / "continued", progress=events.append
     )
-    assert events[0] == {"stage": "training", "step": 0, "max_steps": 8}
+    assert events[0] == {
+        "stage": "training",
+        "step": 0,
+        "max_steps": 8,
+        "device": "cpu",
+    }
     assert len(batches) == 8
     assert all(text.startswith("Cancel") for batch in batches for text in batch)
     continued = provenance(result.checkpoint_dir)
@@ -890,7 +907,12 @@ def test_gliner_training_continues_a_checkpoint_on_new_data_from_step_zero(
         fake_trainer(saved, []).finetune(
             **inputs, output_dir=tmp_path / name, progress=events.append
         )
-        assert events[0] == {"stage": "training", "step": first, "max_steps": 8}
+        assert events[0] == {
+            "stage": "training",
+            "step": first,
+            "max_steps": 8,
+            "device": "cpu",
+        }
 
 
 def test_failed_gliner_training_keeps_only_published_checkpoints(tmp_path, monkeypatch):

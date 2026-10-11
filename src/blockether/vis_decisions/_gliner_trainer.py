@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 from ._trainer import (
     TrainingResult,
     _config,
+    _cpu_state,
+    _device,
     _export_fp32,
     _fingerprint,
     _publish_checkpoint,
@@ -139,11 +141,21 @@ def _examples(source: str | Path) -> list[_Example]:
 
 
 def _extractor(
-    base: type, schedule: _Schedule, after_step: Callable[[Any, dict], None]
+    base: type,
+    schedule: _Schedule,
+    after_step: Callable[[Any, dict], None],
+    device: Any,
 ) -> type:
-    """Adapt the pinned gliner2 2.0.0 trainer to the Vis batch order and step hook."""
+    """Adapt the pinned gliner2 2.0.0 trainer to the Vis batch order, device and step hook."""
 
     class Extractor(base):
+        def _setup_device(self) -> None:
+            # gliner2 selects only CUDA or the CPU; Vis also trains FP32 on Apple MPS.
+            self.device = device
+            self.is_distributed = False
+            self.model.to(device)
+            self.model.float()
+
         def _create_dataloader(
             self,
             dataset: Any,
@@ -169,6 +181,20 @@ def _extractor(
                 after_step(
                     self, metrics if isinstance(metrics, dict) else metrics.to_dict()
                 )
+
+        def _save_checkpoint(self, name: str) -> None:
+            if not self.config.use_lora:
+                super()._save_checkpoint(name)
+                return
+            # gliner2 saves only the adapter of its PeftModel, also for a full save.
+            # Keep the full weights with the LoRA deltas merged, like other families.
+            from safetensors.torch import save_file
+
+            directory = self.output_dir / name
+            directory.mkdir(exist_ok=True)
+            extractor = self.model.get_base_model()
+            extractor.save_pretrained(str(directory), merge_lora=False)
+            save_file(_cpu_state(extractor), str(directory / "model.safetensors"))
 
         def train(self, *args: Any, **kwargs: Any) -> Any:
             # gliner2 never removes its per-parameter gradient hooks. Each hook
@@ -328,7 +354,10 @@ class GlinerTrainer:
     ) -> TrainingResult:
         """Train both labels, keep resumable checkpoints and publish validated FP32.
 
-        ``progress`` receives the step, ``max_steps``, epoch and loss about once per
+        The configuration ``device`` (``auto``, ``cpu``, ``mps`` or ``cuda``) selects
+        the FP32 training device; export and validation use the CPU. ``lora`` trains
+        low-rank adapters that each checkpoint merges into full weights.
+        ``progress`` receives the step, ``max_steps``, epoch, loss and device about once per
         percent of the run. With ``checkpoint_steps``, ``output_dir/checkpoint`` keeps
         the latest partial checkpoint when training fails or stops. Training that
         checkpoint with the same rows and settings resumes at its saved step.
@@ -353,6 +382,10 @@ class GlinerTrainer:
         if {identity(row) for row in rows} & {identity(row) for row in evaluation}:
             raise ValueError("Training and evaluation examples must be disjoint")
         config = _training_config(training_config)
+        import torch
+
+        device = _device(torch, config.get("device", "auto"))
+        lora = config.get("lora")
         policy = _config(validation_policy, kind="quality policy")
         target = Path(output_dir).expanduser().resolve()
         if target.exists():
@@ -394,6 +427,7 @@ class GlinerTrainer:
                 "encoder_lr": config["encoder_lr"],
                 "task_lr": config["task_lr"],
                 "seed": config.get("seed", 42),
+                **({"lora": lora} if lora else {}),
             },
             ([row.text, row.tasks, row.target, row.action] for row in rows),
         )
@@ -435,7 +469,11 @@ class GlinerTrainer:
                 return _publish_checkpoint(
                     pending,
                     target,
-                    {"steps": step, "max_steps": schedule.total},
+                    {
+                        "steps": step,
+                        "max_steps": schedule.total,
+                        "device": device.type,
+                    },
                     progress,
                 )
 
@@ -458,6 +496,7 @@ class GlinerTrainer:
                             "max_steps": schedule.total,
                             "epoch": round(step / schedule.per_pass, 4),
                             "loss": loss,
+                            "device": device.type,
                         }
                     )
                 if every and step % every == 0 and step < schedule.total:
@@ -484,6 +523,17 @@ class GlinerTrainer:
                 fp16=False,
                 bf16=False,
                 report_to_wandb=False,
+                **(
+                    {
+                        "use_lora": True,
+                        "lora_r": lora["rank"],
+                        "lora_alpha": lora["alpha"],
+                        "lora_dropout": lora["dropout"],
+                        "save_adapter_only": False,
+                    }
+                    if lora
+                    else {}
+                ),
             )
             try:
                 if progress:
@@ -492,9 +542,10 @@ class GlinerTrainer:
                             "stage": "training",
                             "step": schedule.done,
                             "max_steps": schedule.total,
+                            "device": device.type,
                         }
                     )
-                trainer = _extractor(ExtractorTrainer, schedule, after_step)
+                trainer = _extractor(ExtractorTrainer, schedule, after_step, device)
                 summary = trainer(model, training).train(dataset)
                 if summary["total_steps"] != schedule.total - schedule.done:
                     raise ValueError("GLiNER training stopped before its planned steps")

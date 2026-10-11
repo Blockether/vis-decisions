@@ -13,7 +13,7 @@ import numpy as np
 import onnxruntime as ort
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 from transformers import Qwen3_5TextConfig, Qwen3_5TextModel, Qwen3Config, Qwen3Model
 
@@ -22,13 +22,15 @@ from blockether.vis_decisions._decision2 import (
     PROBES,
     PROMPT_VERSION,
     CandidateHead,
+    encode,
+    fit,
     make_batch,
     prepare_fp32,
 )
 from blockether.vis_decisions._decision2_trainer import _examples
 from blockether.vis_decisions._models import DECISION2
 from blockether.vis_decisions._publication import package
-from blockether.vis_decisions._trainer import _quality_report
+from blockether.vis_decisions._trainer import _LORA_TARGETS, _quality_report
 from blockether.vis_decisions.decision2_training import (
     Decision2Trainer,
     Decision2TrainingBundle,
@@ -468,6 +470,86 @@ def test_decision2_policy_has_no_action_gate(tmp_path):
         largest_error=0.0,
     )
     assert json.loads(report.read_text())["action_accuracy"] is None
+
+
+def test_max_input_tokens_cuts_only_the_end_of_the_state(tmp_path):
+    """#366: a long training state fits the limit; the question and options stay."""
+    source = source_checkpoint(tmp_path / "source")
+    tokenizer = Tokenizer.from_file(str(source / "tokenizer.json"))
+    state = " ".join(STATES * 10)
+    prompt = _examples(write_rows(tmp_path / "rows.jsonl", [row(state, 0)]))[0].prompt
+    empty = len(encode({**prompt, "state": ""}, tokenizer)["ids"])
+    fitted = fit(prompt, tokenizer, empty + 20)
+    assert len(encode(fitted, tokenizer)["ids"]) <= empty + 20
+    assert fitted["state"] and state.startswith(fitted["state"])
+    assert (
+        len(
+            encode({**prompt, "state": state[: len(fitted["state"]) + 1]}, tokenizer)[
+                "ids"
+            ]
+        )
+        > empty + 20
+    )
+    assert {**fitted, "state": None} == {**prompt, "state": None}
+    assert fit(prompt, tokenizer, 4096) is prompt
+    with pytest.raises(ValueError, match="without its state"):
+        fit(prompt, tokenizer, empty - 1)
+
+
+DEVICES = ["cpu", *(["mps"] if torch.backends.mps.is_available() else [])]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("model_id", [MODEL_ID, KAI_ID])
+def test_lora_training_on_each_device_merges_full_fp32_weights(
+    tmp_path, model_id, device
+):
+    """#366: train on CPU or MPS with LoRA; save, export and validate on the CPU."""
+    bundle = base_checkpoint(tmp_path, model_id)
+    inputs = training_inputs(
+        tmp_path / "inputs",
+        device=device,
+        lora={"rank": 4, "alpha": 8},
+        max_input_tokens=4096,
+        checkpoint_steps=1,
+    )
+    events = []
+    with Trainer(bundle) as trainer:
+        result = trainer.train(
+            **inputs, output_dir=tmp_path / "trained", progress=events.append
+        )
+    training = [event for event in events if event["stage"] == "training"]
+    assert {event["device"] for event in training} == {device}
+    report = json.loads((tmp_path / "trained/training_report.json").read_text())
+    assert (report["device"], report["status"]) == (device, "checkpoint_saved")
+    original = load_file(bundle.path / "backbone/model.safetensors")
+    trained = load_file(result.checkpoint_dir / "backbone/model.safetensors")
+    assert trained.keys() == original.keys()
+    assert all(tensor.dtype == torch.float32 for tensor in trained.values())
+    changed = {
+        name for name in trained if not torch.equal(trained[name], original[name])
+    }
+    # Only LoRA-adapted projection weights change; norms and embeddings stay frozen.
+    assert changed and all(
+        name.rsplit(".", 2)[-2] in _LORA_TARGETS and name.endswith(".weight")
+        for name in changed
+    )
+    assert json.loads(result.validation_report.read_text())["examples"] == 2
+    assert (
+        provenance(result.inference_bundle)["revision"]
+        == provenance(result.checkpoint_dir)["revision"]
+    )
+
+
+def test_max_input_tokens_cannot_exceed_the_decision2_limit(tmp_path):
+    bundle = base_checkpoint(tmp_path)
+    inputs = training_inputs(tmp_path / "inputs", max_input_tokens=8192)
+    with (
+        Decision2Trainer(bundle) as trainer,
+        pytest.raises(ValueError, match="4096 token limit"),
+    ):
+        trainer.finetune(**inputs, output_dir=tmp_path / "trained")
+    assert not (tmp_path / "trained").exists()
 
 
 def test_official_checkpoint_exports_the_upstream_answers(tmp_path):

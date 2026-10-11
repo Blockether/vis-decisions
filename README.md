@@ -19,7 +19,7 @@ Add the extension to your project `vis.yml`:
 extensions:
   vis-decisions:
     source: https://github.com/Blockether/vis-decisions
-    version: '0.4.0'
+    version: '0.5.0'
 ```
 
 Reload the project. The first installation downloads the pinned Python dependencies.
@@ -113,6 +113,45 @@ To choose another number, set `OMP_NUM_THREADS` before you start Python.
 
 Decision 2.0 has no action head. Its quality policy sets only `min_decision_accuracy`.
 Its validation report gives no action accuracy.
+
+### Choose the training device
+
+Set `device` in the training configuration to `auto`, `cpu`, `mps` or `cuda`.
+The default `auto` uses CUDA, then Apple MPS, then the CPU.
+On a Mac with Apple silicon, `auto` trains on the GPU through MPS.
+Export and validation always run on the CPU in FP32.
+The progress events and the training report name the device that trained the model.
+
+If PyTorch MPS does not support an operation of a model, training stops with an error.
+Then set `PYTORCH_ENABLE_MPS_FALLBACK=1` before Python starts, or set `"device": "cpu"`.
+
+### Train with LoRA
+
+GLiNER and Decision 2.0 can train low-rank adapters (LoRA) instead of all weights.
+LoRA uses less memory and is faster, mostly for Decision 2.0.
+Each saved checkpoint merges the adapters into complete FP32 weights.
+Thus the export, the resume and the Vis inference stay the same as for full training.
+
+```json
+{
+  "epochs": 1,
+  "max_steps": 500,
+  "device": "auto",
+  "lora": {"rank": 16, "alpha": 32, "dropout": 0.05}
+}
+```
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `lora.rank` | An integer in [1,256] | Required |
+| `lora.alpha` | A number in (0,4096] | Two times `rank` |
+| `lora.dropout` | A number in [0,1) | `0` |
+
+Laya does not accept `lora`. To train its encoder, set `"train_encoder": true`.
+
+Decision 2.0 also accepts `max_input_tokens`, at most 4096.
+Training cuts longer training states to this number of tokens.
+Use a smaller value to reduce memory use on a small GPU.
 
 The [Vis guide](https://github.com/Blockether/vis/blob/main/resources/vis-docs/decision-models.md#train-locally-with-the-python-sdk)
 explains the row formats, training settings and quality policy.

@@ -268,6 +268,69 @@ def test_training_threads_follow_omp_or_the_usable_cores(monkeypatch):
     assert _threads(SimpleNamespace(get_num_threads=lambda: 12)) == 12
 
 
+def test_training_device_lora_and_token_options_are_validated(tmp_path):
+    """#366: device, LoRA and token settings fail before any model loads."""
+    from blockether.vis_decisions._trainer import (
+        _config,
+        _device,
+        _device_errors,
+        _training_config,
+    )
+
+    def config(**settings) -> Path:
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({"encoder_lr": 1e-5, "task_lr": 1e-4, **settings}))
+        return path
+
+    accepted = _training_config(
+        config(device="mps", lora={"rank": 8}, max_input_tokens=1024), tokens=True
+    )
+    assert accepted["lora"] == {"rank": 8, "alpha": 16.0, "dropout": 0.0}
+    for settings, message in (
+        ({"device": "tpu"}, "auto, cpu, mps or cuda"),
+        ({"lora": {"alpha": 4}}, "needs rank"),
+        ({"lora": {"rank": 0}}, "rank must be"),
+        ({"lora": {"rank": 4, "alpha": 0}}, "alpha must be"),
+        ({"lora": {"rank": 4, "dropout": 1}}, "dropout must be"),
+        ({"lora": {"rank": 4, "bias": True}}, "accepts only"),
+        ({"max_input_tokens": 10}, "max_input_tokens must be"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _training_config(config(**settings), tokens=True)
+    with pytest.raises(ValueError, match="Unknown training configuration option"):
+        _training_config(config(max_input_tokens=1024))
+    laya = tmp_path / "laya.json"
+    laya.write_text('{"epochs": 1, "learning_rate": 0.0001, "device": "gpu"}')
+    with pytest.raises(ValueError, match="auto, cpu, mps or cuda"):
+        _config(laya, kind="training configuration")
+
+    def torch(cuda: bool, mps: bool) -> SimpleNamespace:
+        return SimpleNamespace(
+            device=lambda name: SimpleNamespace(type=name),
+            cuda=SimpleNamespace(is_available=lambda: cuda),
+            backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)),
+        )
+
+    assert _device(torch(True, True)).type == "cuda"
+    assert _device(torch(False, True)).type == "mps"
+    assert _device(torch(False, False)).type == "cpu"
+    assert _device(torch(False, True), "cpu").type == "cpu"
+    with pytest.raises(ValueError, match="mps is not available"):
+        _device(torch(False, False), "mps")
+    with pytest.raises(ValueError, match="cuda is not available"):
+        _device(torch(False, True), "cuda")
+    with (
+        pytest.raises(RuntimeError, match="PYTORCH_ENABLE_MPS_FALLBACK=1"),
+        _device_errors(SimpleNamespace(type="mps")),
+    ):
+        raise NotImplementedError("aten::example")
+    with (
+        pytest.raises(NotImplementedError),
+        _device_errors(SimpleNamespace(type="cpu")),
+    ):
+        raise NotImplementedError("aten::example")
+
+
 def test_inventory_hashes_bundle_files_in_order_without_the_license(tmp_path):
     from blockether.vis_decisions.training import _inventory
 
@@ -370,6 +433,26 @@ class FakeLoss(float):
         return self
 
 
+class FakeInput(str):
+    """A batch value that records nothing and stays itself on every device."""
+
+    def to(self, device: object) -> "FakeInput":
+        return self
+
+
+class FakeOptions(list):
+    def to(self, device: object) -> "FakeOptions":
+        return self
+
+
+class FakeWeights(list):
+    def detach(self) -> "FakeWeights":
+        return self
+
+    def cpu(self) -> "FakeWeights":
+        return self
+
+
 class FakeParameter:
     requires_grad = True
 
@@ -383,6 +466,7 @@ class FakeLaya:
     def __init__(self, trained: list[str]) -> None:
         self.trained = trained
         self.current = None
+        self.devices = []
         self.head, self.encoder_weight = FakeParameter(), FakeParameter()
         self.encoder = SimpleNamespace(
             parameters=lambda: [self.encoder_weight],
@@ -403,8 +487,12 @@ class FakeLaya:
     def eval(self) -> None:
         pass
 
+    def to(self, device: object) -> "FakeLaya":
+        self.devices.append(getattr(device, "type", device))
+        return self
+
     def state_dict(self) -> dict:
-        return {"trained": list(self.trained)}
+        return {"trained": FakeWeights(self.trained)}
 
     def __call__(self, state: str, *_) -> tuple[FakeLoss, FakeLoss]:
         self.current = state
@@ -434,10 +522,10 @@ def laya_trainer(bundle: TrainingBundle, prepare=None):
     )
     trainer._exporter = SimpleNamespace(
         make_batch=lambda agent, state, questions: (
-            state,
-            None,
-            None,
-            [SimpleNamespace(sum=lambda: 2)],
+            FakeInput(state),
+            FakeInput(),
+            FakeInput(),
+            FakeOptions([SimpleNamespace(sum=lambda: 2)]),
         ),
         save_file=lambda weights, path: Path(path).write_text(
             json.dumps(weights["trained"])
@@ -449,7 +537,10 @@ def laya_trainer(bundle: TrainingBundle, prepare=None):
     )
     trainer._torch = SimpleNamespace(
         manual_seed=lambda seed: None,
-        tensor=lambda value: value,
+        device=lambda name: SimpleNamespace(type=name),
+        cuda=SimpleNamespace(is_available=lambda: False),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+        tensor=lambda value, device=None: value,
         isfinite=math.isfinite,
         optim=SimpleNamespace(AdamW=lambda parameters, lr: optimizer),
         nn=SimpleNamespace(
@@ -520,6 +611,7 @@ def test_laya_training_resumes_a_partial_checkpoint_or_continues_on_new_rows(tmp
         "max_steps": 12,
         "epoch": 0.2,
         "loss": 1.0,
+        "device": "cpu",
     }
     assert events[-3:] == [
         {"stage": "checkpoint_saved", "step": 12, "max_steps": 12},
@@ -543,11 +635,12 @@ def test_laya_training_resumes_a_partial_checkpoint_or_continues_on_new_rows(tmp
     assert not list(tmp_path.glob(".decision-train-*"))
     assert trained_states(stopped / "checkpoint") == expected[:5]
     report = json.loads((stopped / "training_report.json").read_text())
-    assert (report["steps"], report["max_steps"], report["status"]) == (
-        5,
-        12,
-        "partial",
-    )
+    assert (
+        report["steps"],
+        report["max_steps"],
+        report["device"],
+        report["status"],
+    ) == (5, 12, "cpu", "partial")
     partial = json.loads((stopped / "checkpoint/PROVENANCE.json").read_text())
     assert partial["partial"]["step"] == 5 and partial["parent_revision"] == "pinned"
 
@@ -560,13 +653,14 @@ def test_laya_training_resumes_a_partial_checkpoint_or_continues_on_new_rows(tmp
         progress=events.append,
     )
     assert events[:2] == [
-        {"stage": "training", "step": 5, "max_steps": 12},
+        {"stage": "training", "step": 5, "max_steps": 12, "device": "cpu"},
         {
             "stage": "training",
             "step": 6,
             "max_steps": 12,
             "epoch": 1.2,
             "loss": pytest.approx(1 / 6),
+            "device": "cpu",
         },
     ]
     assert trained_states(resumed.checkpoint_dir) == expected
@@ -583,7 +677,12 @@ def test_laya_training_resumes_a_partial_checkpoint_or_continues_on_new_rows(tmp
         config,
         progress=events.append,
     )
-    assert events[0] == {"stage": "training", "step": 0, "max_steps": 6}
+    assert events[0] == {
+        "stage": "training",
+        "step": 0,
+        "max_steps": 6,
+        "device": "cpu",
+    }
     assert trained_states(continued.checkpoint_dir) == expected[:5] + ["n0", "n1"] * 3
 
 
