@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from ._models import ARCHITECTURES, DECISION2
+from ._models import ARCHITECTURES, D3, DECISION2
 from ._publication import package
 from .api import Trainer, TrainingBundle
 
@@ -43,6 +43,7 @@ def run(spec_path: Path) -> None:
     if model_id != "laya-typed-decisions" and model_id not in {
         *ARCHITECTURES,
         *DECISION2,
+        *D3,
     }:
         raise ValueError("Unknown decision training model identity")
     _progress({"stage": "loading"})

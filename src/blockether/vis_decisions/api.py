@@ -1,4 +1,4 @@
-"""One training interface for complete, verified Laya, GLiNER and Decision 2.0 checkpoints."""
+"""One training interface for verified Laya, GLiNER, Decision 2.0 and D3 checkpoints."""
 
 from __future__ import annotations
 
@@ -7,13 +7,19 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ._models import ARCHITECTURES, DECISION2
+from ._models import ARCHITECTURES, D3, DECISION2
 from ._trainer import ModernBertTrainer, TrainingResult
+from .d3_training import D3Trainer, D3TrainingBundle
 from .decision2_training import Decision2Trainer, Decision2TrainingBundle
 from .gliner_training import GlinerTrainer, GlinerTrainingBundle
 from .training import TrainingBundle as LayaTrainingBundle
 
-Bundle = LayaTrainingBundle | GlinerTrainingBundle | Decision2TrainingBundle
+Bundle = (
+    LayaTrainingBundle
+    | GlinerTrainingBundle
+    | Decision2TrainingBundle
+    | D3TrainingBundle
+)
 
 
 class TrainingBundle:
@@ -31,6 +37,8 @@ class TrainingBundle:
             return GlinerTrainingBundle.open(root)
         if model_id in DECISION2:
             return Decision2TrainingBundle.open(root)
+        if model_id in D3:
+            return D3TrainingBundle.open(root)
         raise ValueError("Unsupported decision training model identity")
 
     @staticmethod
@@ -47,6 +55,8 @@ class TrainingBundle:
             return Decision2TrainingBundle.fetch(
                 model_ref=model_ref, cache_dir=destination
             )
+        if model_id in D3:
+            return D3TrainingBundle.fetch(model_ref=model_ref, cache_dir=destination)
         raise ValueError("Unsupported decision training model identity")
 
 
@@ -61,6 +71,8 @@ class Trainer:
             self._trainer = GlinerTrainer(checkpoint)
         elif isinstance(checkpoint, Decision2TrainingBundle):
             self._trainer = Decision2Trainer(checkpoint)
+        elif isinstance(checkpoint, D3TrainingBundle):
+            self._trainer = D3Trainer(checkpoint)
         else:
             self._trainer = ModernBertTrainer(checkpoint)
 

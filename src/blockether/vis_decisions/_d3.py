@@ -21,12 +21,14 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer
 from transformers import Qwen3_5TextConfig, Qwen3_5TextModel
 
 from . import _decision2
 from ._models import D3, D3_FORMAT
+from ._trainer import _cpu_state
+from .d3_training import _checkpoint_model
 from .training import _inventory
 
 FAMILY = "d3"
@@ -147,7 +149,8 @@ class D3Model(torch.nn.Module):
     ) -> None:
         super().__init__()
         self.backbone = backbone
-        self.register_buffer("readout", readout)
+        # A parameter, so that training can update it; inference keeps it frozen.
+        self.readout = torch.nn.Parameter(readout, requires_grad=False)
         self.codes = codes
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -155,7 +158,9 @@ class D3Model(torch.nn.Module):
         # Every full-attention query sees every key; the linear layers stay causal.
         mask = {
             "full_attention": torch.ones(
-                (input_ids.shape[0], 1, 1, length), dtype=torch.bool
+                (input_ids.shape[0], 1, 1, length),
+                dtype=torch.bool,
+                device=input_ids.device,
             ),
             "linear_attention": None,
         }
@@ -166,22 +171,7 @@ class D3Model(torch.nn.Module):
 
 
 def _model_id(source: Path) -> str:
-    manifest = json.loads((source / "MODEL_MANIFEST.json").read_text("utf-8"))
-    metadata = json.loads((source / "decision_config.json").read_text("utf-8"))
-    model_id = manifest.get("model_name")
-    if (
-        model_id not in D3
-        or manifest.get("repo_id") != f"vllm-sr/{model_id}"
-        or metadata.get("format_id") != D3_FORMAT
-        or metadata.get("prompt") != "d3"
-        or metadata.get("attention_mode") != "noncausal_full_attention"
-        or metadata.get("pooling", "last") != "last"
-        or metadata.get("readout_dtype", "float32") != "float32"
-        or metadata.get("temperature", 1.0) != 1.0
-        or len(metadata.get("codes", ())) != MAX_OPTIONS
-    ):
-        raise ValueError("Checkpoint is not a supported D3 code-readout model")
-    return model_id
+    return _checkpoint_model(source)
 
 
 def load_checkpoint(source: str | Path) -> tuple[D3Model, Tokenizer]:
@@ -217,6 +207,51 @@ def encode(
     """Tokenize one rendered prompt; special tokens in the text become their IDs."""
     text = render(row["state"], row["question"], codes)
     return tokenizer.encode(text, add_special_tokens=False).ids
+
+
+def fit(
+    row: Mapping[str, Any],
+    tokenizer: Tokenizer,
+    codes: Sequence[str],
+    max_length: int,
+) -> Mapping[str, Any]:
+    """Cut the end of the state text until the prompt has at most ``max_length`` tokens.
+
+    The prompt structure, the question and every option stay complete.
+    """
+    return _decision2._fit_state(
+        row, max_length, lambda value: len(encode(value, tokenizer, codes))
+    )
+
+
+# The text weights and settings of a D3 checkpoint, without the vision tower.
+CHECKPOINT_SETTINGS = (
+    "config.json",
+    "decision_config.json",
+    "MODEL_MANIFEST.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+)
+
+
+def save_checkpoint(
+    model: D3Model, source: str | Path, destination: str | Path
+) -> Path:
+    """Save FP32 CPU text weights and readout with the settings of ``source``.
+
+    LoRA adapters are merged into the saved weights; the model in memory is unchanged.
+    """
+    source, destination = Path(source), Path(destination)
+    destination.mkdir(parents=True)
+    weights = {
+        f"{_PREFIX}{name}": value for name, value in _cpu_state(model.backbone).items()
+    }
+    save_file(weights, str(destination / "model.safetensors"))
+    readout = model.readout.detach().cpu().contiguous()
+    save_file({"weight": readout}, str(destination / "readout.safetensors"))
+    for name in CHECKPOINT_SETTINGS:
+        shutil.copyfile(source / name, destination / name)
+    return destination
 
 
 class D3Graph(torch.nn.Module):
@@ -349,8 +384,12 @@ def prepare_fp32(
     *,
     revision: str,
     model_id: str | None = None,
+    license_file: str | Path | None = None,
 ) -> dict[str, float | int]:
-    """Atomically prepare an offline, inventoried FP32 bundle from an upstream checkpoint."""
+    """Atomically prepare an offline, inventoried FP32 bundle from a D3 checkpoint.
+
+    ``license_file`` defaults to the ``LICENSE`` file of an upstream checkpoint.
+    """
     source = Path(source).expanduser().resolve()
     destination = Path(destination).expanduser().resolve()
     if destination.exists():
@@ -358,7 +397,8 @@ def prepare_fp32(
     checkpoint = _model_id(source)
     if model_id not in {None, checkpoint}:
         raise ValueError(f"Checkpoint is not a {model_id} model")
-    if not (source / "LICENSE").is_file():
+    license_file = Path(license_file) if license_file else source / "LICENSE"
+    if not license_file.is_file():
         raise FileNotFoundError("The checkpoint has no Apache-2.0 LICENSE file")
     model, tokenizer = load_checkpoint(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -375,7 +415,7 @@ def prepare_fp32(
         (staging / "tokenizer").mkdir()
         for name in ("tokenizer.json", "tokenizer_config.json"):
             shutil.copyfile(source / name, staging / "tokenizer" / name)
-        shutil.copyfile(source / "LICENSE", staging / "LICENSE.txt")
+        shutil.copyfile(license_file, staging / "LICENSE.txt")
         metadata = {
             "schema_version": 1,
             "kind": "inference",

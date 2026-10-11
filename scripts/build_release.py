@@ -19,7 +19,7 @@ from pathlib import Path
 _TIMESTAMP = (2025, 1, 1, 0, 0, 0)
 _NAME = re.compile(r"[a-z0-9][a-z0-9+._-]*\.zip\Z")
 # Laya provenance has no family. Decision 2.0 keeps its backbone and head apart.
-# D3 is an inference-only family: the upstream checkpoint has no training bundle.
+# D3 training keeps the upstream text weights and readout, without the vision tower.
 _MANDATORY = {
     None: {
         "inference": {"model.onnx", "rl_agent_config.json", "tokenizer/tokenizer.json"},
@@ -53,6 +53,15 @@ _MANDATORY = {
             "model.onnx.data",
             "tokenizer/tokenizer.json",
             "tokenizer/tokenizer_config.json",
+        },
+        "training": {
+            "config.json",
+            "decision_config.json",
+            "MODEL_MANIFEST.json",
+            "model.safetensors",
+            "readout.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json",
         },
     },
 }

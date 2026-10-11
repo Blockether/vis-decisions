@@ -1,7 +1,6 @@
 # Vis Decisions
 
-Train Laya, GLiNER and Decision 2.0 decision models with one Python environment and one Vis extension.
-Export the vLLM Semantic Router D3 models as inference bundles.
+Train Laya, GLiNER, Decision 2.0 and D3 decision models with one Python environment and one Vis extension.
 Keep your training rows local. Export verified FP32 inference bundles for Vis.
 
 ## When to use
@@ -112,8 +111,10 @@ Keep the output directory new for each run.
 Training uses one CPU thread for each physical core, or for each performance core on Apple silicon.
 To choose another number, set `OMP_NUM_THREADS` before you start Python.
 
-Decision 2.0 has no action head. Its quality policy sets only `min_decision_accuracy`.
-Its validation report gives no action accuracy.
+Decision 2.0 and D3 have no action head. Their quality policy sets only `min_decision_accuracy`.
+Their validation reports give no action accuracy.
+D3 training raises the readout score of the answer code of each row's `target` option.
+D3 prompts have no padding, so each training step runs its rows one at a time.
 
 ### Choose the training device
 
@@ -130,8 +131,8 @@ That setting moves unsupported operations to the CPU without an error, so Vis do
 
 ### Train with LoRA
 
-Laya, GLiNER and Decision 2.0 can train low-rank adapters (LoRA) instead of all weights.
-LoRA uses less memory and is faster, mostly for Decision 2.0.
+Laya, GLiNER, Decision 2.0 and D3 can train low-rank adapters (LoRA) instead of all weights.
+LoRA uses less memory and is faster, mostly for Decision 2.0 and D3.
 Each saved checkpoint merges the adapters into complete FP32 weights.
 Thus the export, the resume and the Vis inference stay the same as for full training.
 
@@ -155,6 +156,7 @@ Do not set `"train_encoder": true` together with `lora`; that is an error.
 To train all encoder weights instead, set `"train_encoder": true` without `lora`.
 
 Decision 2.0 also accepts `max_input_tokens`, at most 16384 for Eos and 8192 for Kai.
+D3 accepts `max_input_tokens` up to 16384.
 Training cuts longer training states to this number of tokens.
 Use a smaller value to reduce memory use on a small GPU.
 
@@ -189,7 +191,8 @@ To prepare a D3 FP32 bundle, run `scripts/export_d3.py` with `--checkpoint`, `--
 The D3 export accepts `d3-edge`, `d3-lite` and `d3-nano`, and checks the ONNX logits against PyTorch.
 In the D3 graph, full attention runs in blocks of 256 queries, so memory grows linearly with the prompt.
 A D3 bundle accepts prompts of up to 16,384 tokens.
-D3 is an inference-only family: you cannot train it with this extension.
+`D3TrainingBundle.from_local` makes a D3 training checkpoint from the upstream checkpoint.
+It keeps the text weights and the readout, without the vision tower.
 To pack prepared bundles for the release, run `scripts/build_release.py`.
 It verifies each file, writes reproducible archives and prints their sizes and digests for the catalog.
 

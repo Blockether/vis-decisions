@@ -100,13 +100,30 @@ def test_decision2_bundle_needs_its_settings_and_external_weights(tmp_path):
         inventory(source)
 
 
-def test_d3_bundle_is_inference_only(tmp_path):
+def test_d3_bundles_need_their_inference_or_training_files(tmp_path):
     source = prepared_bundle(tmp_path / "source", _DECISION2, family="d3")
     assert "model.onnx.data" in [name for name, _ in inventory(source)]
+    training = {
+        name: b"{}"
+        for name in (
+            "config.json",
+            "decision_config.json",
+            "MODEL_MANIFEST.json",
+            "model.safetensors",
+            "readout.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        )
+    }
     source = prepared_bundle(
-        tmp_path / "training", _DECISION2, family="d3", kind="training"
+        tmp_path / "training", training, family="d3", kind="training"
     )
-    with pytest.raises(ValueError, match="no training bundle"):
+    assert "readout.safetensors" in [name for name, _ in inventory(source)]
+    incomplete = {k: v for k, v in training.items() if k != "readout.safetensors"}
+    source = prepared_bundle(
+        tmp_path / "incomplete", incomplete, family="d3", kind="training"
+    )
+    with pytest.raises(ValueError, match="required file"):
         inventory(source)
 
 
