@@ -154,7 +154,7 @@ For Laya, LoRA trains adapters in the encoder and the full heads.
 Do not set `"train_encoder": true` together with `lora`; that is an error.
 To train all encoder weights instead, set `"train_encoder": true` without `lora`.
 
-Decision 2.0 also accepts `max_input_tokens`, at most 4096.
+Decision 2.0 also accepts `max_input_tokens`, at most 16384 for Eos and 8192 for Kai.
 Training cuts longer training states to this number of tokens.
 Use a smaller value to reduce memory use on a small GPU.
 

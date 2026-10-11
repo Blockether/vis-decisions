@@ -28,6 +28,12 @@ DECISION2_BACKBONES = {
     "decision2.0-kai-0.6b": "qwen3",
 }
 
+# The context length of each model on its upstream model card, in tokens.
+DECISION2_CONTEXT = {
+    "decision2.0-eos-0.8b": 16384,
+    "decision2.0-kai-0.6b": 8192,
+}
+
 DECISION2_PROMPT_VERSION = "decision2-segmented-options-global-query-v1"
 
 # D3 code-readout models: the text backbone plus a 255-way answer-code readout.

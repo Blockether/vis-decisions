@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._models import DECISION2_CONTEXT
 from ._trainer import (
     TrainingResult,
     _config,
@@ -412,11 +413,14 @@ class Decision2Trainer:
         if {_identity(row) for row in rows} & {_identity(row) for row in evaluation}:
             raise ValueError("Training and evaluation examples must be disjoint")
         config = _training_config(training_config, tokens=True)
-        limit = config.get("max_input_tokens")
-        if limit is not None and limit > self._exporter.MAX_INPUT_TOKENS:
+        limit, context = (
+            config.get("max_input_tokens"),
+            DECISION2_CONTEXT[self.checkpoint.model_id],
+        )
+        if limit is not None and limit > context:
             raise ValueError(
-                "Training max_input_tokens exceeds the "
-                f"{self._exporter.MAX_INPUT_TOKENS} token limit of Decision 2.0"
+                f"Training max_input_tokens exceeds the {context} token limit "
+                f"of {self.checkpoint.model_id}"
             )
         device = _device(self._torch, config.get("device", "auto"))
         policy = _config(validation_policy, kind="quality policy", actions=False)

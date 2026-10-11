@@ -154,11 +154,14 @@ def test_export_chunks_attention_and_keeps_a_last_token_tail(tmp_path):
     assert "Softmax" not in nodes
 
 
+@pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("length", [1, 5, 8, 21])
-def test_chunked_attention_matches_full_attention(length):
-    heads, size, rows = 2, 4, 8
+def test_chunked_attention_matches_full_attention(length, causal):
+    heads, size, rows, batch = 2, 4, 8, 2
     inputs = [
-        onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, [1, None, 8])
+        onnx.helper.make_tensor_value_info(
+            name, onnx.TensorProto.FLOAT, [None, None, 8]
+        )
         for name in ("query", "key", "value")
     ]
     node = onnx.helper.make_node(
@@ -168,6 +171,7 @@ def test_chunked_attention_matches_full_attention(length):
         domain="com.microsoft",
         num_heads=heads,
         scale=0.3,
+        unidirectional=int(causal),
     )
     model = onnx.helper.make_model(
         onnx.helper.make_graph(
@@ -176,7 +180,7 @@ def test_chunked_attention_matches_full_attention(length):
             inputs,
             [
                 onnx.helper.make_tensor_value_info(
-                    "output", onnx.TensorProto.FLOAT, [1, None, 8]
+                    "output", onnx.TensorProto.FLOAT, [None, None, 8]
                 )
             ],
         ),
@@ -188,7 +192,7 @@ def test_chunked_attention_matches_full_attention(length):
     )
     assert _d3._decision2.chunk_attention(model, rows=rows) == 1
     onnx.checker.check_model(model)
-    query, key, value = np.random.default_rng(length).normal(size=(3, 1, length, 8))
+    query, key, value = np.random.default_rng(length).normal(size=(3, batch, length, 8))
     feeds = {
         "query": query.astype(np.float32),
         "key": key.astype(np.float32),
@@ -200,14 +204,16 @@ def test_chunked_attention_matches_full_attention(length):
     chunked = session.run(None, feeds)[0]
 
     def heads_first(array):
-        return array.reshape(length, heads, size).transpose(1, 0, 2)
+        return array.reshape(batch, length, heads, size).transpose(0, 2, 1, 3)
 
-    scores = heads_first(query) @ heads_first(key).transpose(0, 2, 1) * 0.3
+    scores = heads_first(query) @ heads_first(key).transpose(0, 1, 3, 2) * 0.3
+    if causal:
+        scores = np.where(np.triu(np.ones((length, length)), 1), -np.inf, scores)
     weights = np.exp(scores - scores.max(-1, keepdims=True))
     weights /= weights.sum(-1, keepdims=True)
-    expected = (weights @ heads_first(value)).transpose(1, 0, 2).reshape(1, length, 8)
-    assert chunked.shape == (1, length, 8)
-    assert np.allclose(chunked, expected, atol=1e-5)
+    expected = (weights @ heads_first(value)).transpose(0, 2, 1, 3)
+    assert chunked.shape == (batch, length, 8)
+    assert np.allclose(chunked, expected.reshape(batch, length, 8), atol=1e-5)
 
 
 def test_full_attention_sees_tokens_after_each_query():

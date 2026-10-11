@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnxruntime as ort
 import pytest
 import torch
@@ -28,7 +29,7 @@ from blockether.vis_decisions._decision2 import (
     prepare_fp32,
 )
 from blockether.vis_decisions._decision2_trainer import _examples
-from blockether.vis_decisions._models import DECISION2
+from blockether.vis_decisions._models import DECISION2, DECISION2_CONTEXT
 from blockether.vis_decisions._publication import package
 from blockether.vis_decisions._trainer import _LORA_TARGETS, _quality_report
 from blockether.vis_decisions.decision2_training import (
@@ -313,6 +314,7 @@ def test_tiny_checkpoint_exports_validated_fp32_and_packages(tmp_path, model_id)
     assert metadata["precision"] == "fp32"
     assert metadata["family"] == "decision2"
     assert metadata["prompt_version"] == PROMPT_VERSION
+    assert metadata["max_input_tokens"] == DECISION2_CONTEXT[model_id]
     assert "score_bias" not in metadata
     assert set(metadata["files"]) == {
         "decision_config.json",
@@ -321,6 +323,12 @@ def test_tiny_checkpoint_exports_validated_fp32_and_packages(tmp_path, model_id)
         "tokenizer/tokenizer.json",
         "tokenizer/tokenizer_config.json",
     }
+    # Issue #366: causal attention runs in query blocks, without a tokens x tokens matrix.
+    graph = onnx.load(tmp_path / "inference" / "model.onnx", load_external_data=False)
+    nodes = [node.op_type for node in graph.graph.node]
+    assert "Loop" in nodes
+    assert "MultiHeadAttention" not in nodes
+    assert "Softmax" not in nodes
     digest, size = package(tmp_path / "inference", tmp_path / "inference.zip")
     assert len(digest) == 64 and size > 0
 
@@ -541,12 +549,14 @@ def test_lora_training_on_each_device_merges_full_fp32_weights(
     )
 
 
-def test_max_input_tokens_cannot_exceed_the_decision2_limit(tmp_path):
-    bundle = base_checkpoint(tmp_path)
-    inputs = training_inputs(tmp_path / "inputs", max_input_tokens=8192)
+@pytest.mark.parametrize("model_id", [MODEL_ID, KAI_ID])
+def test_max_input_tokens_cannot_exceed_the_model_limit(tmp_path, model_id):
+    bundle = base_checkpoint(tmp_path, model_id)
+    limit = DECISION2_CONTEXT[model_id]
+    inputs = training_inputs(tmp_path / "inputs", max_input_tokens=limit + 1)
     with (
         Decision2Trainer(bundle) as trainer,
-        pytest.raises(ValueError, match="4096 token limit"),
+        pytest.raises(ValueError, match=f"{limit} token limit"),
     ):
         trainer.finetune(**inputs, output_dir=tmp_path / "trained")
     assert not (tmp_path / "trained").exists()

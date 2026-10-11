@@ -32,7 +32,12 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     torch_chunk_gated_delta_rule,
 )
 
-from ._models import DECISION2, DECISION2_BACKBONES, DECISION2_PROMPT_VERSION
+from ._models import (
+    DECISION2,
+    DECISION2_BACKBONES,
+    DECISION2_CONTEXT,
+    DECISION2_PROMPT_VERSION,
+)
 from ._trainer import _cpu_state
 from .decision2_training import _checkpoint_model
 from .training import _inventory, _sha256
@@ -40,7 +45,8 @@ from .training import _inventory, _sha256
 FAMILY = "decision2"
 PROMPT_VERSION = DECISION2_PROMPT_VERSION
 INPUT_NAMES = ("input_ids", "candidate_positions", "query_positions")
-MAX_INPUT_TOKENS = 4096
+# The largest model context; ``PROVENANCE.json`` gives the limit of each model.
+MAX_INPUT_TOKENS = max(DECISION2_CONTEXT.values())
 # Queries in one block of chunked attention; see ``chunk_attention``.
 ATTENTION_ROWS = 256
 # Each backbone type gives its class, rotary function and attention output gate.
@@ -329,10 +335,10 @@ def _linear_attention(module, hidden: torch.Tensor) -> torch.Tensor:
 
 
 class _FusedAttention(torch.autograd.Function):
-    """Non-causal attention over flat ``(batch, length, heads * size)`` tensors."""
+    """Attention over flat ``(batch, length, heads * size)`` tensors."""
 
     @staticmethod
-    def forward(ctx, query, key, value, heads, scale):
+    def forward(ctx, query, key, value, heads, scale, causal):
         batch, rows, width = query.shape
         length = key.shape[1]
         size = width // heads
@@ -340,13 +346,14 @@ class _FusedAttention(torch.autograd.Function):
             query.view(batch, rows, heads, size).transpose(1, 2),
             key.view(batch, length, heads, size).transpose(1, 2),
             value.view(batch, length, heads, size).transpose(1, 2),
+            is_causal=causal,
             scale=scale,
         )
         return output.transpose(1, 2).reshape(batch, rows, width)
 
     @staticmethod
-    def symbolic(graph, query, key, value, heads, scale):
-        # The CPU kernel works in tiles, so memory grows linearly with the input.
+    def symbolic(graph, query, key, value, heads, scale, causal):
+        # ``chunk_attention`` replaces this node after the export.
         output = graph.op(
             "com.microsoft::MultiHeadAttention",
             query,
@@ -354,6 +361,7 @@ class _FusedAttention(torch.autograd.Function):
             value,
             num_heads_i=heads,
             scale_f=scale,
+            unidirectional_i=int(causal),
         )
         output.setType(query.type())
         return output
@@ -370,7 +378,8 @@ def chunk_attention(model: onnx.ModelProto, rows: int = ATTENTION_ROWS) -> int:
 
     Each block uses MatMul and Softmax, which run faster on CPU than the fused kernel.
     One block holds ``rows x length`` scores for each head, so memory grows linearly
-    with the input. The graph must have batch size 1. Returns the count of replaced nodes.
+    with the input. A ``unidirectional`` node masks later keys, and each of its blocks
+    reads only the keys up to the block end. Returns the count of replaced nodes.
     """
     nodes, replaced = [], 0
     for index, node in enumerate(model.graph.node):
@@ -396,6 +405,8 @@ def chunk_attention(model: onnx.ModelProto, rows: int = ATTENTION_ROWS) -> int:
         split = constant("split", [0, 0, options["num_heads"], -1])
         scale = constant("scale", options.get("scale", 1.0), np.float32)
         one = constant("one", [1])
+        zero = constant("zero", [0])
+        causal = bool(options.get("unidirectional", 0))
         heads_first = [0, 2, 1, 3]
         queries = add("Reshape", [query, split], "query_heads")
         queries = add("Transpose", [queries], "query_t", perm=heads_first)
@@ -413,7 +424,7 @@ def chunk_attention(model: onnx.ModelProto, rows: int = ATTENTION_ROWS) -> int:
         pad = add("Sub", [padded, length], "pad")
         pads = add(
             "Concat",
-            [constant("pad_start", [0] * 6), pad, constant("zero", [0])],
+            [constant("pad_start", [0] * 6), pad, zero],
             "pads",
             axis=0,
         )
@@ -424,9 +435,38 @@ def chunk_attention(model: onnx.ModelProto, rows: int = ATTENTION_ROWS) -> int:
         start = add("Mul", [step, block], "start", inner)
         end = add("Add", [start, block], "end", inner)
         part = add("Slice", [queries, start, end, constant("axis", [2])], "part", inner)
-        scores = add("MatMul", [part, keys], "scores", inner)
+        if causal:
+            # Block queries see keys up to the block end; mask the later keys in the block.
+            seen = add(
+                "Slice", [keys, zero, end, constant("key_axis", [3])], "seen", inner
+            )
+            visible = add(
+                "Slice",
+                [values, zero, end, constant("value_axis", [2])],
+                "visible",
+                inner,
+            )
+            scores = add("MatMul", [part, seen], "raw_scores", inner)
+            first = add("Squeeze", [start], "first_query", inner)
+            last = add("Squeeze", [end], "last_query", inner)
+            unit = constant("unit", 1)
+            known = add("Shape", [seen], "known", inner, start=3, end=4)
+            known = add("Squeeze", [known], "key_count", inner)
+            origin = constant("origin", 0)
+            asked = add("Range", [first, last, unit], "query_index", inner)
+            offered = add("Range", [origin, known, unit], "key_index", inner)
+            asked = add("Unsqueeze", [asked, one], "query_column", inner)
+            offered = add("Unsqueeze", [offered, zero], "key_row", inner)
+            later = add("Greater", [offered, asked], "later", inner)
+            hidden_score = constant(
+                "hidden_score", np.finfo(np.float32).min, np.float32
+            )
+            scores = add("Where", [later, hidden_score, scores], "scores", inner)
+        else:
+            visible = values
+            scores = add("MatMul", [part, keys], "scores", inner)
         weights = add("Softmax", [scores], "weights", inner, axis=-1)
-        mixed = add("MatMul", [weights, values], "mixed", inner)
+        mixed = add("MatMul", [weights, visible], "mixed", inner)
         still = add("Identity", [running], "still_running", inner)
         body = helper.make_graph(
             inner,
@@ -442,9 +482,9 @@ def chunk_attention(model: onnx.ModelProto, rows: int = ATTENTION_ROWS) -> int:
         )
         always = constant("always", True, np.bool_)
         blocks = add("Loop", [trips, always], "blocks", body=body)
-        # (blocks, 1, heads, rows, size) -> (1, padded, heads * size) -> (1, length, width)
+        # (blocks, batch, heads, rows, size) -> (batch, padded, width) -> (batch, length, width)
         merged = add("Transpose", [blocks], "merged", perm=[1, 0, 3, 2, 4])
-        shape = add("Concat", [one, constant("rest", [-1]), width], "shape", axis=0)
+        shape = add("Concat", [zero, constant("rest", [-1]), width], "shape", axis=0)
         merged = add("Reshape", [merged, shape], "flat")
         nodes.append(
             helper.make_node(
@@ -471,7 +511,7 @@ def _full_attention(
 ) -> torch.Tensor:
     """Grouped-query attention; ``causal=False`` lets every token see the whole input.
 
-    Non-causal attention exports as one ONNX Runtime ``MultiHeadAttention`` node.
+    Attention exports as one ``MultiHeadAttention`` node; ``chunk_attention`` replaces it.
     ``last_only`` computes the output of the last token only.
     """
     if causal and last_only:
@@ -508,19 +548,14 @@ def _full_attention(
         .expand(batch, heads, groups, length, size)
         .reshape(batch, heads * groups, length, size)
     )
-    if causal:
-        output = F.scaled_dot_product_attention(
-            query, key, value, is_causal=True, scale=module.scaling
-        )
-        output = output.transpose(1, 2).reshape(batch, count, -1)
-    else:
-        output = _FusedAttention.apply(
-            query.transpose(1, 2).reshape(batch, count, -1),
-            key.transpose(1, 2).reshape(batch, length, -1),
-            value.transpose(1, 2).reshape(batch, length, -1),
-            module.config.num_attention_heads,
-            float(module.scaling),
-        )
+    output = _FusedAttention.apply(
+        query.transpose(1, 2).reshape(batch, count, -1),
+        key.transpose(1, 2).reshape(batch, length, -1),
+        value.transpose(1, 2).reshape(batch, length, -1),
+        module.config.num_attention_heads,
+        float(module.scaling),
+        causal,
+    )
     if gated:
         output = output * torch.sigmoid(gate)
     return module.o_proj(output)
@@ -634,8 +669,11 @@ def export_graph(
                 dynamo=False,
                 external_data=True,
             )
+        graph_proto = onnx.load(str(exported))
+        if chunk_attention(graph_proto) != graph.layer_types.count("full_attention"):
+            raise RuntimeError("Decision 2.0 export lost a full-attention layer")
         onnx.save_model(
-            onnx.load(str(exported)),
+            graph_proto,
             str(output),
             save_as_external_data=True,
             all_tensors_to_one_file=True,
@@ -808,7 +846,7 @@ def prepare_fp32(
             "family": FAMILY,
             "architecture": DECISION2[checkpoint],
             "prompt_version": PROMPT_VERSION,
-            "max_input_tokens": MAX_INPUT_TOKENS,
+            "max_input_tokens": DECISION2_CONTEXT[checkpoint],
             "model": checkpoint,
             "revision": revision,
             "license": "Apache-2.0",
