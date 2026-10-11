@@ -268,7 +268,7 @@ def test_training_threads_follow_omp_or_the_usable_cores(monkeypatch):
     assert _threads(SimpleNamespace(get_num_threads=lambda: 12)) == 12
 
 
-def test_training_device_lora_and_token_options_are_validated(tmp_path):
+def test_training_device_lora_and_token_options_are_validated(tmp_path, monkeypatch):
     """#366: device, LoRA and token settings fail before any model loads."""
     from blockether.vis_decisions._trainer import (
         _config,
@@ -303,6 +303,20 @@ def test_training_device_lora_and_token_options_are_validated(tmp_path):
     laya.write_text('{"epochs": 1, "learning_rate": 0.0001, "device": "gpu"}')
     with pytest.raises(ValueError, match="auto, cpu, mps or cuda"):
         _config(laya, kind="training configuration")
+    laya.write_text('{"epochs": 1, "learning_rate": 0.0001, "lora": {"rank": 4}}')
+    assert _config(laya, kind="training configuration")["lora"] == {
+        "rank": 4,
+        "alpha": 8.0,
+        "dropout": 0.0,
+    }
+    for settings, message in (
+        ({"lora": {"rank": 4}, "train_encoder": True}, "remove train_encoder"),
+        ({"lora": {"rank": 0}}, "rank must be"),
+        ({"lora": True}, "needs rank"),
+    ):
+        laya.write_text(json.dumps({"epochs": 1, "learning_rate": 0.0001, **settings}))
+        with pytest.raises(ValueError, match=message):
+            _config(laya, kind="training configuration")
 
     def torch(cuda: bool, mps: bool) -> SimpleNamespace:
         return SimpleNamespace(
@@ -319,11 +333,23 @@ def test_training_device_lora_and_token_options_are_validated(tmp_path):
         _device(torch(False, False), "mps")
     with pytest.raises(ValueError, match="cuda is not available"):
         _device(torch(False, True), "cuda")
+    # MPS is a hard choice: PyTorch must not move an operation to the CPU in silence.
+    monkeypatch.setenv("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    for name in ("mps", "auto"):
+        with pytest.raises(
+            ValueError, match="does not allow PYTORCH_ENABLE_MPS_FALLBACK"
+        ):
+            _device(torch(False, True), name)
+    assert _device(torch(False, True), "cpu").type == "cpu"
+    assert _device(torch(True, True)).type == "cuda"
+    monkeypatch.setenv("PYTORCH_ENABLE_MPS_FALLBACK", "0")
+    assert _device(torch(False, True), "mps").type == "mps"
     with (
-        pytest.raises(RuntimeError, match="PYTORCH_ENABLE_MPS_FALLBACK=1"),
+        pytest.raises(RuntimeError, match='Set "device": "cpu"') as unsupported,
         _device_errors(SimpleNamespace(type="mps")),
     ):
         raise NotImplementedError("aten::example")
+    assert "FALLBACK" not in str(unsupported.value)
     with (
         pytest.raises(NotImplementedError),
         _device_errors(SimpleNamespace(type="cpu")),

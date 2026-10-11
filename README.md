@@ -124,11 +124,13 @@ Export and validation always run on the CPU in FP32.
 The progress events and the training report name the device that trained the model.
 
 If PyTorch MPS does not support an operation of a model, training stops with an error.
-Then set `PYTORCH_ENABLE_MPS_FALLBACK=1` before Python starts, or set `"device": "cpu"`.
+Then set `"device": "cpu"`.
+With MPS, `PYTORCH_ENABLE_MPS_FALLBACK` is an error before training starts.
+That setting moves unsupported operations to the CPU without an error, so Vis does not accept it.
 
 ### Train with LoRA
 
-GLiNER and Decision 2.0 can train low-rank adapters (LoRA) instead of all weights.
+Laya, GLiNER and Decision 2.0 can train low-rank adapters (LoRA) instead of all weights.
 LoRA uses less memory and is faster, mostly for Decision 2.0.
 Each saved checkpoint merges the adapters into complete FP32 weights.
 Thus the export, the resume and the Vis inference stay the same as for full training.
@@ -148,7 +150,9 @@ Thus the export, the resume and the Vis inference stay the same as for full trai
 | `lora.alpha` | A number in (0,4096] | Two times `rank` |
 | `lora.dropout` | A number in [0,1) | `0` |
 
-Laya does not accept `lora`. To train its encoder, set `"train_encoder": true`.
+For Laya, LoRA trains adapters in the encoder and the full heads.
+Do not set `"train_encoder": true` together with `lora`; that is an error.
+To train all encoder weights instead, set `"train_encoder": true` without `lora`.
 
 Decision 2.0 also accepts `max_input_tokens`, at most 4096.
 Training cuts longer training states to this number of tokens.

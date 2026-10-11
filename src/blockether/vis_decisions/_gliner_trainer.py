@@ -22,6 +22,7 @@ from ._trainer import (
     _config,
     _cpu_state,
     _device,
+    _device_errors,
     _export_fp32,
     _fingerprint,
     _publish_checkpoint,
@@ -546,7 +547,8 @@ class GlinerTrainer:
                         }
                     )
                 trainer = _extractor(ExtractorTrainer, schedule, after_step, device)
-                summary = trainer(model, training).train(dataset)
+                with _device_errors(device):
+                    summary = trainer(model, training).train(dataset)
                 if summary["total_steps"] != schedule.total - schedule.done:
                     raise ValueError("GLiNER training stopped before its planned steps")
                 if any(

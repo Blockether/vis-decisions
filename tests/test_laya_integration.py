@@ -225,3 +225,59 @@ def test_finetune_resume_and_reopen_fp32_without_network(
         timeout=180,
     )
     assert process.returncode == 0, process.stderr[-1000:]
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+def test_lora_training_saves_full_merged_weights_on_each_device(
+    base, labeled, tmp_path, monkeypatch, device
+):
+    """#366: Laya LoRA trains on the CPU and on MPS and saves full merged weights."""
+    import torch
+    from safetensors.torch import load_file
+
+    if device == "mps" and not torch.backends.mps.is_available():
+        pytest.skip("Apple MPS is not available")
+    monkeypatch.delenv("PYTORCH_ENABLE_MPS_FALLBACK", raising=False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    monkeypatch.setattr(socket.socket, "connect", _deny_network)
+    train, evaluation, policy, config = labeled
+    config.write_text(
+        json.dumps(
+            {
+                "epochs": 2,
+                "learning_rate": 1e-3,
+                "max_steps": 2,
+                "device": device,
+                "lora": {"rank": 4},
+            }
+        )
+    )
+    progress = []
+    with Trainer(base) as trainer:
+        result = trainer.train(
+            train_data=train,
+            eval_data=evaluation,
+            training_config=config,
+            validation_policy=policy,
+            output_dir=tmp_path / "lora",
+            progress=progress.append,
+        )
+        # The adapters are merged; the model in memory has plain layers again.
+        names = trainer._trainer.agent.model.state_dict()
+        assert not any("lora_" in name or "base_layer" in name for name in names)
+    steps = [event for event in progress if event["stage"] == "training"]
+    assert {event["device"] for event in steps} == {device}
+    parent = load_file(base.path / "model.safetensors")
+    trained = load_file(result.checkpoint_dir / "model.safetensors")
+    assert set(trained) == set(parent)
+    changed = {name for name in parent if not torch.equal(parent[name], trained[name])}
+    assert any(name.startswith("encoder.") and "Wqkv" in name for name in changed)
+    assert any(not name.startswith("encoder.") for name in changed)
+    # Only adapter targets and the heads change in the encoder.
+    assert all(
+        not name.startswith("encoder.")
+        or name.rsplit(".", 2)[-2] in {"Wqkv", "Wo", "Wi"}
+        for name in changed
+    )
+    assert (result.inference_bundle / "model.onnx").is_file()

@@ -58,13 +58,23 @@ _LORA_TARGETS = (
     "gate_proj",
     "up_proj",
     "down_proj",
+    # ModernBERT, the Laya encoder.
+    "Wqkv",
+    "Wo",
+    "Wi",
 )
+
+
+def _mps_fallback() -> bool:
+    """Return whether PyTorch may run an unsupported MPS operation on the CPU."""
+    return os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "").strip() not in ("", "0")
 
 
 def _device(torch: Any, name: str = "auto") -> Any:
     """Resolve the FP32 training device. Export and validation always stay on the CPU.
 
-    ``auto`` uses CUDA, then Apple MPS, then the CPU.
+    ``auto`` uses CUDA, then Apple MPS, then the CPU. MPS never moves an operation to the
+    CPU in silence, so ``PYTORCH_ENABLE_MPS_FALLBACK`` with MPS is an error.
     """
     if name not in DEVICES:
         raise ValueError("Training device must be auto, cpu, mps or cuda")
@@ -79,21 +89,26 @@ def _device(torch: Any, name: str = "auto") -> Any:
             "Training device mps is not available: it needs Apple silicon, macOS 12.3 "
             "or later and a PyTorch build with MPS"
         )
+    if name == "mps" and _mps_fallback():
+        raise ValueError(
+            "Training device mps does not allow PYTORCH_ENABLE_MPS_FALLBACK: PyTorch would "
+            "run unsupported operations on the CPU without an error. Unset it, or set "
+            '"device": "cpu" in the training configuration'
+        )
     return torch.device(name)
 
 
 @contextlib.contextmanager
 def _device_errors(device: Any) -> Iterator[None]:
-    """Replace an unsupported MPS operation with an error that names the two fixes."""
+    """Make an operation that MPS does not support a hard error."""
     try:
         yield
     except NotImplementedError as error:
         if getattr(device, "type", None) != "mps":
             raise
         raise RuntimeError(
-            f"PyTorch MPS does not support an operation of this model ({error}). "
-            "Set PYTORCH_ENABLE_MPS_FALLBACK=1 before the trainer process starts, "
-            'or set "device": "cpu" in the training configuration.'
+            f"Training device mps does not support an operation of this model ({error}). "
+            'Set "device": "cpu" in the training configuration.'
         ) from error
 
 
@@ -140,6 +155,19 @@ def _with_lora(module: Any, settings: dict) -> Any:
     )
     for name, parameter in module.named_parameters():
         parameter.requires_grad_("lora_" in name)
+    return module
+
+
+def _merge_lora(module: Any) -> Any:
+    """Merge the LoRA adapters of ``module`` into their base layers and remove them."""
+    from peft.tuners.lora import LoraLayer
+
+    for name, layer in list(module.named_modules()):
+        if isinstance(layer, LoraLayer):
+            delta = layer.get_delta_weight("default").detach()
+            layer.base_layer.weight.data.add_(delta)
+            parent, _, child = name.rpartition(".")
+            setattr(module.get_submodule(parent), child, layer.base_layer)
     return module
 
 
@@ -224,10 +252,17 @@ def _config(source: str | Path, *, kind: str, actions: bool = True) -> dict:
             "max_steps",
             "checkpoint_steps",
             "device",
+            "lora",
         }:
             raise ValueError("Unknown training configuration option")
         if config.get("device", "auto") not in DEVICES:
             raise ValueError("Training device must be auto, cpu, mps or cuda")
+        if "lora" in config:
+            if config.get("train_encoder", False):
+                raise ValueError(
+                    "Training lora trains adapters in the encoder; remove train_encoder"
+                )
+            config["lora"] = _lora_settings(config["lora"])
         epochs = config.get("epochs")
         rate = config.get("learning_rate")
         if type(epochs) is not int or not 1 <= epochs <= 100:
@@ -440,7 +475,9 @@ class ModernBertTrainer:
     """Explicit FP32 training. An ONNX inference bundle is never a checkpoint.
 
     The training configuration ``device`` selects ``auto``, ``cpu``, ``mps`` or
-    ``cuda``. Checkpoints, export and validation always run on the CPU.
+    ``cuda``. ``lora`` trains encoder adapters and the heads; each checkpoint merges
+    the adapters into full weights. Checkpoints, export and validation always run on
+    the CPU.
 
     Each JSONL row contains ``state``, one Laya ``question``, an integer
     ``target`` option index and ``action`` (0=act, 1=escalate). Evaluation rows
@@ -492,11 +529,11 @@ class ModernBertTrainer:
     ) -> None:
         directory.mkdir(parents=True)
         exporter = self._exporter
+        state = self.agent.model.state_dict()
         exporter.save_file(
-            {
-                name: tensor.detach().cpu()
-                for name, tensor in self.agent.model.state_dict().items()
-            },
+            _cpu_state(self.agent.model)
+            if any(".lora_" in name for name in state)
+            else {name: tensor.detach().cpu() for name, tensor in state.items()},
             str(directory / "model.safetensors"),
         )
         (directory / "rl_agent_config.json").write_text(
@@ -677,6 +714,7 @@ class ModernBertTrainer:
                 "learning_rate": config["learning_rate"],
                 "train_encoder": config.get("train_encoder", False),
                 "seed": config.get("seed", 42),
+                **({"lora": config["lora"]} if "lora" in config else {}),
             },
             rows,
         )
@@ -699,6 +737,9 @@ class ModernBertTrainer:
         train_encoder = config.get("train_encoder", False)
         for parameter in model.encoder.parameters():
             parameter.requires_grad_(train_encoder)
+        lora = config.get("lora")
+        if lora:
+            model.encoder = _with_lora(model.encoder, lora)
         parameters = [
             parameter for parameter in model.parameters() if parameter.requires_grad
         ]
@@ -782,6 +823,8 @@ class ModernBertTrainer:
                         save(step)
                 optimizer.zero_grad(set_to_none=True)
                 model.to("cpu")
+                if lora:
+                    model.encoder = _merge_lora(model.encoder)
                 model.eval()
                 checkpoint = save(total)
             if progress:
@@ -803,6 +846,8 @@ class ModernBertTrainer:
             optimizer.zero_grad(set_to_none=True)
             del optimizer
             model.to("cpu")
+            if lora:
+                model.encoder = _merge_lora(model.encoder)
             gc.collect()
 
 
