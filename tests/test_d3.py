@@ -2,6 +2,9 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
+import onnx
+import onnxruntime as ort
 import pytest
 import torch
 from tokenizers import Tokenizer
@@ -82,15 +85,17 @@ def test_user_prompt_shows_empty_state_and_default_question():
     assert prompt.startswith("State:\n(empty)\n\nQuestion:\nChoose the best matching")
 
 
-def _tiny_model() -> tuple[_d3.D3Model, Tokenizer]:
+def _tiny_model(
+    # Full attention first: later layers read positions that saw future tokens.
+    layer_types: tuple[str, ...] = ("full_attention", "linear_attention"),
+) -> tuple[_d3.D3Model, Tokenizer]:
     torch.manual_seed(7)
     config = Qwen3_5TextConfig(
         vocab_size=64,
         hidden_size=64,
         intermediate_size=128,
-        num_hidden_layers=2,
-        # Full attention first: later layers read positions that saw future tokens.
-        layer_types=["full_attention", "linear_attention"],
+        num_hidden_layers=len(layer_types),
+        layer_types=list(layer_types),
         num_attention_heads=2,
         num_key_value_heads=1,
         head_dim=128,
@@ -132,6 +137,77 @@ def test_tiny_export_matches_pytorch_for_each_prompt_length(tmp_path):
     report = _d3.validate_graph(model, tokenizer, output)
     assert report["examples"] == len(_d3.PROBES)
     assert report["max_abs_logit_error"] < 1e-4
+
+
+def test_export_chunks_attention_and_keeps_a_last_token_tail(tmp_path):
+    # Issue #366: unchunked attention kept a tokens x tokens matrix in memory.
+    model, tokenizer = _tiny_model(
+        ("full_attention", "linear_attention", "full_attention")
+    )
+    output = _d3.export_graph(model, tokenizer, tmp_path / "model.onnx")
+    report = _d3.validate_graph(model, tokenizer, output)
+    assert report["max_abs_logit_error"] < 1e-4
+    graph = onnx.load(output, load_external_data=False).graph
+    nodes = [node.op_type for node in graph.node]
+    assert nodes.count("Loop") == 2
+    assert "MultiHeadAttention" not in nodes
+    assert "Softmax" not in nodes
+
+
+@pytest.mark.parametrize("length", [1, 5, 8, 21])
+def test_chunked_attention_matches_full_attention(length):
+    heads, size, rows = 2, 4, 8
+    inputs = [
+        onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, [1, None, 8])
+        for name in ("query", "key", "value")
+    ]
+    node = onnx.helper.make_node(
+        "MultiHeadAttention",
+        ["query", "key", "value"],
+        ["output"],
+        domain="com.microsoft",
+        num_heads=heads,
+        scale=0.3,
+    )
+    model = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [node],
+            "attention",
+            inputs,
+            [
+                onnx.helper.make_tensor_value_info(
+                    "output", onnx.TensorProto.FLOAT, [1, None, 8]
+                )
+            ],
+        ),
+        opset_imports=[
+            onnx.helper.make_opsetid("", 17),
+            onnx.helper.make_opsetid("com.microsoft", 1),
+        ],
+        ir_version=8,
+    )
+    assert _d3._decision2.chunk_attention(model, rows=rows) == 1
+    onnx.checker.check_model(model)
+    query, key, value = np.random.default_rng(length).normal(size=(3, 1, length, 8))
+    feeds = {
+        "query": query.astype(np.float32),
+        "key": key.astype(np.float32),
+        "value": value.astype(np.float32),
+    }
+    session = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    chunked = session.run(None, feeds)[0]
+
+    def heads_first(array):
+        return array.reshape(length, heads, size).transpose(1, 0, 2)
+
+    scores = heads_first(query) @ heads_first(key).transpose(0, 2, 1) * 0.3
+    weights = np.exp(scores - scores.max(-1, keepdims=True))
+    weights /= weights.sum(-1, keepdims=True)
+    expected = (weights @ heads_first(value)).transpose(1, 0, 2).reshape(1, length, 8)
+    assert chunked.shape == (1, length, 8)
+    assert np.allclose(chunked, expected, atol=1e-5)
 
 
 def test_full_attention_sees_tokens_after_each_query():

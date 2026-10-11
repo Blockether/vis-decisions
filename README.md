@@ -187,6 +187,8 @@ No conversion to FP16, BF16 or quantized weights is used to reduce their size.
 To prepare the Decision 2.0 FP32 bundle from the upstream checkpoint, run `scripts/export_decision2.py`.
 To prepare a D3 FP32 bundle, run `scripts/export_d3.py` with `--checkpoint`, `--output` and `--revision`.
 The D3 export accepts `d3-edge`, `d3-lite` and `d3-nano`, and checks the ONNX logits against PyTorch.
+In the D3 graph, full attention runs in blocks of 256 queries, so memory grows linearly with the prompt.
+A D3 bundle accepts prompts of up to 16,384 tokens.
 D3 is an inference-only family: you cannot train it with this extension.
 To pack prepared bundles for the release, run `scripts/build_release.py`.
 It verifies each file, writes reproducible archives and prints their sizes and digests for the catalog.

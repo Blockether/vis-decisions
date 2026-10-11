@@ -21,6 +21,7 @@ import onnx
 import onnxruntime as ort
 import torch
 import torch.nn.functional as F
+from onnx import TensorProto, helper, numpy_helper
 from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer
 from transformers import Qwen3_5TextModel, Qwen3Model
@@ -40,6 +41,8 @@ FAMILY = "decision2"
 PROMPT_VERSION = DECISION2_PROMPT_VERSION
 INPUT_NAMES = ("input_ids", "candidate_positions", "query_positions")
 MAX_INPUT_TOKENS = 4096
+# Queries in one block of chunked attention; see ``chunk_attention``.
+ATTENTION_ROWS = 256
 # Each backbone type gives its class, rotary function and attention output gate.
 _BACKBONES = {
     "qwen3_5_text": (Qwen3_5TextModel, apply_rotary_pos_emb, True),
@@ -325,23 +328,174 @@ def _linear_attention(module, hidden: torch.Tensor) -> torch.Tensor:
     return module.out_proj(core.reshape(batch, length, -1))
 
 
+class _FusedAttention(torch.autograd.Function):
+    """Non-causal attention over flat ``(batch, length, heads * size)`` tensors."""
+
+    @staticmethod
+    def forward(ctx, query, key, value, heads, scale):
+        batch, rows, width = query.shape
+        length = key.shape[1]
+        size = width // heads
+        output = F.scaled_dot_product_attention(
+            query.view(batch, rows, heads, size).transpose(1, 2),
+            key.view(batch, length, heads, size).transpose(1, 2),
+            value.view(batch, length, heads, size).transpose(1, 2),
+            scale=scale,
+        )
+        return output.transpose(1, 2).reshape(batch, rows, width)
+
+    @staticmethod
+    def symbolic(graph, query, key, value, heads, scale):
+        # The CPU kernel works in tiles, so memory grows linearly with the input.
+        output = graph.op(
+            "com.microsoft::MultiHeadAttention",
+            query,
+            key,
+            value,
+            num_heads_i=heads,
+            scale_f=scale,
+        )
+        output.setType(query.type())
+        return output
+
+
+def _constant(name: str, array: np.ndarray) -> onnx.NodeProto:
+    return helper.make_node(
+        "Constant", [], [name], value=numpy_helper.from_array(array, name)
+    )
+
+
+def chunk_attention(model: onnx.ModelProto, rows: int = ATTENTION_ROWS) -> int:
+    """Replace each ``MultiHeadAttention`` node with a loop over blocks of queries.
+
+    Each block uses MatMul and Softmax, which run faster on CPU than the fused kernel.
+    One block holds ``rows x length`` scores for each head, so memory grows linearly
+    with the input. The graph must have batch size 1. Returns the count of replaced nodes.
+    """
+    nodes, replaced = [], 0
+    for index, node in enumerate(model.graph.node):
+        if node.domain != "com.microsoft" or node.op_type != "MultiHeadAttention":
+            nodes.append(node)
+            continue
+        if len(node.input) != 3:
+            raise ValueError("chunk_attention needs query, key and value only")
+        options = {
+            item.name: helper.get_attribute_value(item) for item in node.attribute
+        }
+        query, key, value = node.input
+        prefix = f"/attention{index}/"
+
+        def add(kind, inputs, part, target=nodes, **attributes):
+            target.append(helper.make_node(kind, inputs, [prefix + part], **attributes))
+            return prefix + part
+
+        def constant(part, values, dtype=np.int64):
+            nodes.append(_constant(prefix + part, np.asarray(values, dtype=dtype)))
+            return prefix + part
+
+        split = constant("split", [0, 0, options["num_heads"], -1])
+        scale = constant("scale", options.get("scale", 1.0), np.float32)
+        one = constant("one", [1])
+        heads_first = [0, 2, 1, 3]
+        queries = add("Reshape", [query, split], "query_heads")
+        queries = add("Transpose", [queries], "query_t", perm=heads_first)
+        queries = add("Mul", [queries, scale], "query_scaled")
+        keys = add("Reshape", [key, split], "key_heads")
+        keys = add("Transpose", [keys], "key_t", perm=[0, 2, 3, 1])
+        values = add("Reshape", [value, split], "value_heads")
+        values = add("Transpose", [values], "value_t", perm=heads_first)
+        length = add("Shape", [query], "length", start=1, end=2)
+        width = add("Shape", [query], "width", start=2, end=3)
+        block = add("Min", [length, constant("rows", [rows])], "block")
+        spare = add("Sub", [block, one], "spare")
+        count = add("Div", [add("Add", [length, spare], "ceil"), block], "count")
+        padded = add("Mul", [count, block], "padded")
+        pad = add("Sub", [padded, length], "pad")
+        pads = add(
+            "Concat",
+            [constant("pad_start", [0] * 6), pad, constant("zero", [0])],
+            "pads",
+            axis=0,
+        )
+        queries = add("Pad", [queries, pads], "queries")
+        trips = add("Squeeze", [count], "trips")
+        step, running = prefix + "step", prefix + "running"
+        inner = []
+        start = add("Mul", [step, block], "start", inner)
+        end = add("Add", [start, block], "end", inner)
+        part = add("Slice", [queries, start, end, constant("axis", [2])], "part", inner)
+        scores = add("MatMul", [part, keys], "scores", inner)
+        weights = add("Softmax", [scores], "weights", inner, axis=-1)
+        mixed = add("MatMul", [weights, values], "mixed", inner)
+        still = add("Identity", [running], "still_running", inner)
+        body = helper.make_graph(
+            inner,
+            prefix + "body",
+            [
+                helper.make_tensor_value_info(step, TensorProto.INT64, []),
+                helper.make_tensor_value_info(running, TensorProto.BOOL, []),
+            ],
+            [
+                helper.make_tensor_value_info(still, TensorProto.BOOL, []),
+                helper.make_tensor_value_info(mixed, TensorProto.FLOAT, None),
+            ],
+        )
+        always = constant("always", True, np.bool_)
+        blocks = add("Loop", [trips, always], "blocks", body=body)
+        # (blocks, 1, heads, rows, size) -> (1, padded, heads * size) -> (1, length, width)
+        merged = add("Transpose", [blocks], "merged", perm=[1, 0, 3, 2, 4])
+        shape = add("Concat", [one, constant("rest", [-1]), width], "shape", axis=0)
+        merged = add("Reshape", [merged, shape], "flat")
+        nodes.append(
+            helper.make_node(
+                "Slice",
+                [merged, constant("first", [0]), length, one],
+                [node.output[0]],
+            )
+        )
+        replaced += 1
+    del model.graph.node[:]
+    model.graph.node.extend(nodes)
+    return replaced
+
+
 def _full_attention(
-    module, hidden, cos, sin, rotate, gated, causal: bool = True
+    module,
+    hidden,
+    cos,
+    sin,
+    rotate,
+    gated,
+    causal: bool = True,
+    last_only: bool = False,
 ) -> torch.Tensor:
-    """Grouped-query SDPA; ``causal=False`` lets every token see the whole input."""
+    """Grouped-query attention; ``causal=False`` lets every token see the whole input.
+
+    Non-causal attention exports as one ONNX Runtime ``MultiHeadAttention`` node.
+    ``last_only`` computes the output of the last token only.
+    """
+    if causal and last_only:
+        raise ValueError("last_only needs non-causal attention")
     batch, length, _ = hidden.shape
     size = module.head_dim
+    rows = hidden[:, -1:] if last_only else hidden
+    count = rows.shape[1]
     if gated:
         query, gate = torch.chunk(
-            module.q_proj(hidden).view(batch, length, -1, size * 2), 2, dim=-1
+            module.q_proj(rows).view(batch, count, -1, size * 2), 2, dim=-1
         )
-        gate = gate.reshape(batch, length, -1)
+        gate = gate.reshape(batch, count, -1)
     else:
-        query = module.q_proj(hidden).view(batch, length, -1, size)
+        query = module.q_proj(rows).view(batch, count, -1, size)
     query = module.q_norm(query).transpose(1, 2)
     key = module.k_norm(module.k_proj(hidden).view(batch, length, -1, size))
+    key = key.transpose(1, 2)
     value = module.v_proj(hidden).view(batch, length, -1, size).transpose(1, 2)
-    query, key = rotate(query, key.transpose(1, 2), cos, sin)
+    if last_only:
+        query = rotate(query, query, cos[:, -1:], sin[:, -1:])[0]
+        key = rotate(key, key, cos, sin)[1]
+    else:
+        query, key = rotate(query, key, cos, sin)
     groups = module.num_key_value_groups
     heads = key.shape[1]
     key = (
@@ -354,10 +508,19 @@ def _full_attention(
         .expand(batch, heads, groups, length, size)
         .reshape(batch, heads * groups, length, size)
     )
-    output = F.scaled_dot_product_attention(
-        query, key, value, is_causal=causal, scale=module.scaling
-    )
-    output = output.transpose(1, 2).reshape(batch, length, -1)
+    if causal:
+        output = F.scaled_dot_product_attention(
+            query, key, value, is_causal=True, scale=module.scaling
+        )
+        output = output.transpose(1, 2).reshape(batch, count, -1)
+    else:
+        output = _FusedAttention.apply(
+            query.transpose(1, 2).reshape(batch, count, -1),
+            key.transpose(1, 2).reshape(batch, length, -1),
+            value.transpose(1, 2).reshape(batch, length, -1),
+            module.config.num_attention_heads,
+            float(module.scaling),
+        )
     if gated:
         output = output * torch.sigmoid(gate)
     return module.o_proj(output)
