@@ -12,7 +12,7 @@ from typing import BinaryIO
 
 from blockether.vis._contracts import definition
 
-from ._models import ARCHITECTURES, DECISION2, DECISION2_PROMPT_VERSION
+from ._models import ARCHITECTURES, D3, D3_FORMAT, DECISION2, DECISION2_PROMPT_VERSION
 
 _REQUIRED_LAYA = {
     "model.onnx",
@@ -64,16 +64,22 @@ def _source(bundle: Path) -> list[Path]:
     model_id = provenance.get("model")
     gliner = isinstance(model_id, str) and model_id in ARCHITECTURES
     decision2 = isinstance(model_id, str) and model_id in DECISION2
+    d3 = isinstance(model_id, str) and model_id in D3
     if (
         not isinstance(model_id, str)
-        or model_id not in {"laya-typed-decisions", *ARCHITECTURES, *DECISION2}
+        or model_id not in {"laya-typed-decisions", *ARCHITECTURES, *DECISION2, *D3}
         or provenance.get("kind") != "inference"
         or provenance.get("format") != "onnx"
         or provenance.get("precision") != "fp32"
         or provenance.get("license") != "Apache-2.0"
         or not isinstance(provenance.get("revision"), str)
         or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", provenance["revision"])
-        or (not gliner and not decision2 and provenance.get("family") is not None)
+        or (
+            not gliner
+            and not decision2
+            and not d3
+            and provenance.get("family") is not None
+        )
     ):
         raise ValueError(
             "Only a complete supported FP32 inference bundle can be uploaded"
@@ -89,10 +95,16 @@ def _source(bundle: Path) -> list[Path]:
         or provenance.get("prompt_version") != DECISION2_PROMPT_VERSION
     ):
         raise ValueError("Decision 2.0 bundle provenance has the wrong architecture")
+    if d3 and (
+        provenance.get("family") != "d3"
+        or provenance.get("architecture") != D3[model_id]
+        or provenance.get("prompt_version") != D3_FORMAT
+    ):
+        raise ValueError("D3 bundle provenance has the wrong architecture")
     entries = provenance.get("files")
     if gliner:
         required, config_name = _REQUIRED_GLINER, "config.json"
-    elif decision2:
+    elif decision2 or d3:
         required, config_name = _REQUIRED_DECISION2, "decision_config.json"
     else:
         required, config_name = _REQUIRED_LAYA, "rl_agent_config.json"
@@ -115,6 +127,12 @@ def _source(bundle: Path) -> list[Path]:
         )
         if config.get("architecture") != DECISION2[model_id]:
             raise ValueError("Decision 2.0 bundle config has the wrong architecture")
+    if d3:
+        config = json.loads(
+            (bundle / "decision_config.json").read_text(encoding="utf-8")
+        )
+        if config.get("format_id") != D3_FORMAT:
+            raise ValueError("D3 bundle config has the wrong format")
     paths = []
     expanded = 0
     for path in bundle.rglob("*"):

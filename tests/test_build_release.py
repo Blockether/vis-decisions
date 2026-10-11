@@ -100,6 +100,16 @@ def test_decision2_bundle_needs_its_settings_and_external_weights(tmp_path):
         inventory(source)
 
 
+def test_d3_bundle_is_inference_only(tmp_path):
+    source = prepared_bundle(tmp_path / "source", _DECISION2, family="d3")
+    assert "model.onnx.data" in [name for name, _ in inventory(source)]
+    source = prepared_bundle(
+        tmp_path / "training", _DECISION2, family="d3", kind="training"
+    )
+    with pytest.raises(ValueError, match="no training bundle"):
+        inventory(source)
+
+
 def test_release_builder_rejects_dependency_archives(tmp_path):
     source = tmp_path / "dependencies"
     source.mkdir()

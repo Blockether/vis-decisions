@@ -29,3 +29,12 @@ DECISION2_BACKBONES = {
 }
 
 DECISION2_PROMPT_VERSION = "decision2-segmented-options-global-query-v1"
+
+# D3 code-readout models: the text backbone plus a 255-way answer-code readout.
+D3 = {
+    "d3-edge": "qwen3.5-text-noncausal-code-readout-255",
+    "d3-lite": "qwen3.5-text-noncausal-code-readout-255",
+    "d3-nano": "qwen3.5-text-noncausal-code-readout-255",
+}
+
+D3_FORMAT = "d3-code-readout-v1"

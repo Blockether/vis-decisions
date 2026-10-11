@@ -19,6 +19,7 @@ from pathlib import Path
 _TIMESTAMP = (2025, 1, 1, 0, 0, 0)
 _NAME = re.compile(r"[a-z0-9][a-z0-9+._-]*\.zip\Z")
 # Laya provenance has no family. Decision 2.0 keeps its backbone and head apart.
+# D3 is an inference-only family: the upstream checkpoint has no training bundle.
 _MANDATORY = {
     None: {
         "inference": {"model.onnx", "rl_agent_config.json", "tokenizer/tokenizer.json"},
@@ -43,6 +44,15 @@ _MANDATORY = {
             "decision_head.safetensors",
             "tokenizer.json",
             "tokenizer_config.json",
+        },
+    },
+    "d3": {
+        "inference": {
+            "decision_config.json",
+            "model.onnx",
+            "model.onnx.data",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
         },
     },
 }
@@ -73,6 +83,10 @@ def inventory(source: Path) -> list[tuple[str, Path]]:
         required = _MANDATORY.get(metadata.get("family"))
         if required is None:
             raise ValueError("Unknown model family")
+        if kind not in required:
+            raise ValueError(
+                f"The {metadata.get('family')} family has no {kind} bundle"
+            )
         mandatory = {"LICENSE.txt", *required[kind]}
     else:
         raise ValueError("Unknown bundle kind")

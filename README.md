@@ -1,6 +1,7 @@
 # Vis Decisions
 
 Train Laya, GLiNER and Decision 2.0 decision models with one Python environment and one Vis extension.
+Export the vLLM Semantic Router D3 models as inference bundles.
 Keep your training rows local. Export verified FP32 inference bundles for Vis.
 
 ## When to use
@@ -180,6 +181,9 @@ The downloader verifies every part, joins them, and verifies the complete archiv
 No conversion to FP16, BF16 or quantized weights is used to reduce their size.
 
 To prepare the Decision 2.0 FP32 bundle from the upstream checkpoint, run `scripts/export_decision2.py`.
+To prepare a D3 FP32 bundle, run `scripts/export_d3.py` with `--checkpoint`, `--output` and `--revision`.
+The D3 export accepts `d3-edge`, `d3-lite` and `d3-nano`, and checks the ONNX logits against PyTorch.
+D3 is an inference-only family: you cannot train it with this extension.
 To pack prepared bundles for the release, run `scripts/build_release.py`.
 It verifies each file, writes reproducible archives and prints their sizes and digests for the catalog.
 
@@ -197,4 +201,5 @@ Most tests do not download model weights.
 To run the offline Laya acceptance tests, set `VIS_LAYA_TRAINING_DIR` to a verified complete checkpoint.
 To run the Decide-1B acceptance test, set `VIS_GLINER_DECIDE_1B_CHECKPOINT` and `VIS_GLINER_LICENSE`.
 To run the Decision 2.0 export test, set `VIS_DECISION2_CHECKPOINT` to the upstream checkpoint.
+To run the D3 export test, set `VIS_D3_CHECKPOINT` to the upstream checkpoint.
 The real-model tests cover train, stop, resume, export and reopening in a new process.

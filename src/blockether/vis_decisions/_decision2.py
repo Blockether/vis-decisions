@@ -325,7 +325,10 @@ def _linear_attention(module, hidden: torch.Tensor) -> torch.Tensor:
     return module.out_proj(core.reshape(batch, length, -1))
 
 
-def _full_attention(module, hidden, cos, sin, rotate, gated) -> torch.Tensor:
+def _full_attention(
+    module, hidden, cos, sin, rotate, gated, causal: bool = True
+) -> torch.Tensor:
+    """Grouped-query SDPA; ``causal=False`` lets every token see the whole input."""
     batch, length, _ = hidden.shape
     size = module.head_dim
     if gated:
@@ -352,7 +355,7 @@ def _full_attention(module, hidden, cos, sin, rotate, gated) -> torch.Tensor:
         .reshape(batch, heads * groups, length, size)
     )
     output = F.scaled_dot_product_attention(
-        query, key, value, is_causal=True, scale=module.scaling
+        query, key, value, is_causal=causal, scale=module.scaling
     )
     output = output.transpose(1, 2).reshape(batch, length, -1)
     if gated:
