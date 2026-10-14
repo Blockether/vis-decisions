@@ -63,7 +63,7 @@ for name, label, tag in (
 vis.register_extension(
     vis.Extension(
         name="vis-decisions",
-        version="0.6.0",
+        version="0.6.1",
         description="Train, resume, validate and export Laya, GLiNER, Decision 2.0 and D3 models.",
         alias="decisions",
         symbols=[vis.Symbol(DecisionTools(), name="decisions")],

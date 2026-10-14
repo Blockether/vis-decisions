@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vis-decisions"
-version = "0.6.0"
+version = "0.6.1"
 description = "Train, resume, validate and publish Laya, GLiNER, Decision 2.0 and D3 decision models in Vis."
 keywords = ["machine-learning", "training"]
 readme = "README.md"
@@ -13,7 +13,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "Blockether"}]
 dependencies = [
-  "vis-agent>=0.2.29",
+  "vis-agent>=0.2.45",
   "gliner2==2.0.0",
   "laya==0.3.22",
   "torch==2.14.0",
@@ -49,5 +49,4 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
-vis-agent = {git = "https://github.com/Blockether/vis", rev = "a4d343d6ddccf59159947229243333cd88a46102", subdirectory = "packages/vis-agent"}
 torch = [{index = "pytorch-cpu", marker = "sys_platform == 'linux'"}]
