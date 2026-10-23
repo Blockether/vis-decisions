@@ -4,3 +4,6 @@ __pycache__/
 .ruff_cache/
 dist/
 *.egg-info/
+
+# ONNX Runtime profiling output.
+onnxruntime_profile__*.json
