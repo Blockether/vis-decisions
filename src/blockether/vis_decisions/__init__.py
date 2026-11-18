@@ -33,6 +33,8 @@ class Decisions:
 
     def __init__(self, gateway: GatewayClient) -> None:
         self._gateway = gateway
+        # vis-agent moved the generated route methods from the client to `client.routes`.
+        self._routes = getattr(gateway, "routes", gateway)
 
     def infer(
         self,
@@ -65,7 +67,7 @@ class Decisions:
             raise ValueError("model is required")
         if not isinstance(questions, Mapping):
             raise ValueError("questions must be a mapping")
-        result = self._gateway.post_systemone(
+        result = self._routes.post_systemone(
             body={"model": model, "state": state, "questions": dict(questions)},
             timeout=timeout,
         )
@@ -75,7 +77,7 @@ class Decisions:
 
     def list_models(self, *, timeout: float | None = None) -> list[dict[str, Any]]:
         """Read installed and in-memory states without downloading or loading a model."""
-        result = self._gateway.get_decision_models(timeout=timeout)
+        result = self._routes.get_decision_models(timeout=timeout)
         if not isinstance(result, dict) or not isinstance(result.get("models"), list):
             raise ProtocolError("decision models response lacks a models list")
         models = result["models"]
@@ -87,7 +89,7 @@ class Decisions:
         self, model_ref: str, *, timeout: float | None = None
     ) -> dict[str, Any]:
         """Read an immutable version, including after an ambiguous upload timeout."""
-        result = self._gateway.get_decision_model(model_ref, timeout=timeout)
+        result = self._routes.get_decision_model(model_ref, timeout=timeout)
         if not isinstance(result, dict) or result.get("model_ref") != model_ref:
             raise ProtocolError(
                 "decision model status does not match the requested ref"
@@ -96,7 +98,7 @@ class Decisions:
 
     def get_alias(self, alias: str, *, timeout: float | None = None) -> dict[str, Any]:
         """Read the alias and its current immutable version before changing it."""
-        result = self._gateway.get_decision_alias(alias, timeout=timeout)
+        result = self._routes.get_decision_alias(alias, timeout=timeout)
         if not isinstance(result, dict) or result.get("alias") != alias:
             raise ProtocolError("decision alias response does not match the request")
         return result
@@ -114,7 +116,7 @@ class Decisions:
         A conflict raises GatewayError(409). Upload and training do not activate
         anything. Existing requests finish on their pinned old version.
         """
-        result = self._gateway.put_decision_alias(
+        result = self._routes.put_decision_alias(
             alias,
             model_ref=model_ref,
             expected_current=expected_current,
@@ -173,7 +175,7 @@ class Decisions:
             body["model_id"] = model_id
         if source_job_id is not None:
             body["source_job_id"] = source_job_id
-        result = self._gateway.post_decision_training_job(body=body, timeout=timeout)
+        result = self._routes.post_decision_training_job(body=body, timeout=timeout)
         if (
             not isinstance(result, dict)
             or not _valid_job_id(result.get("job_id"))
@@ -190,7 +192,7 @@ class Decisions:
         """Read a durable job's stage, step, errors, metrics and final model_ref."""
         if not _valid_job_id(job_id):
             raise ValueError("Invalid decision training job id")
-        result = self._gateway.get_decision_training_job(job_id, timeout=timeout)
+        result = self._routes.get_decision_training_job(job_id, timeout=timeout)
         if not isinstance(result, dict) or result.get("job_id") != job_id:
             raise ProtocolError("decision training status does not match the job id")
         return result
@@ -204,7 +206,7 @@ class Decisions:
         """
         if not _valid_job_id(job_id):
             raise ValueError("Invalid decision training job id")
-        result = self._gateway.delete_decision_training_job(job_id, timeout=timeout)
+        result = self._routes.delete_decision_training_job(job_id, timeout=timeout)
         if not isinstance(result, dict) or result.get("job_id") != job_id:
             raise ProtocolError(
                 "decision training cancellation returned an invalid job id"
