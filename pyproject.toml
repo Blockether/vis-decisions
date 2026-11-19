@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "vis-decisions"
 version = "0.6.2"
 description = "Train, resume, validate and publish Laya, GLiNER, Decision 2.0 and D3 decision models in Vis."
-keywords = ["machine-learning", "training"]
+keywords = ["machine-learning"]
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
