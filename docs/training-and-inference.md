@@ -1,0 +1,185 @@
+# Train and use decision models
+
+- To train from chat, [enable the extension](#use-in-vis).
+- To train from Python, [open a complete checkpoint](#train-with-python).
+- To continue an interrupted run, [resume a saved checkpoint](#resume-or-continue-training).
+- To classify with OpenAI's GPT-6 Luna instead of a local model, [ask an OpenAI decision model](#ask-openai-decision-models).
+- To select a model or configure live decisions, use the [Vis decision-model guide](https://github.com/Blockether/vis/blob/main/resources/vis-docs/decision-models.md).
+
+## Use in Vis
+
+[Install and use the extension](../README.md#install). The first installation downloads the pinned Python dependencies.
+Local training needs enough memory and space for complete checkpoints.
+Decide-1B and Decision 2.0 need several gigabytes for each checkpoint or export.
+
+`decisions.fetch` takes a model reference in the form `<id>@<revision>`.
+Training, export and packaging do not publish a model or activate an alias.
+
+## Ask OpenAI decision models
+
+The `Decisions` client also reaches OpenAI classifier models, such as GPT-6 Luna, through your gateway.
+Use the same questions and the same answer shapes as for a local model.
+Name the model as `openai/<id>`:
+
+```python
+answer = decisions.infer(
+    model="openai/gpt-6-luna",
+    state="A damaged item needs a refund",
+    questions={
+        "intent": {
+            "type": "choice",
+            "instructions": "Choose a request",
+            "criteria": ["refund", "repair"],
+        }
+    },
+)
+# Prints: refund openai
+print(answer["answers"]["intent"]["choice"], answer["routing"]["provider"])
+```
+
+The gateway needs an OpenAI API key, from the `openai` provider or `OPENAI_API_KEY`.
+A ChatGPT (Codex) sign-in does not work with the OpenAI Decisions API.
+`decisions.list_models()` shows `"available": true` when the gateway has a key.
+OpenAI answers have no `action` head. If OpenAI declines a question, its answer is `{"type": "refusal"}`.
+Each request is a paid OpenAI call, and the state goes to OpenAI.
+
+## Train with Python
+
+Clone this repository. Install the locked environment:
+
+```bash
+uv sync --frozen --python 3.12
+```
+
+The same environment trains all four families.
+It pins Transformers 5.17.0, GLiNER2 2.0.0, Laya 0.3.22 and PyTorch 2.14.0.
+The model releases contain weights and metadata, not Python dependency archives.
+
+Find a pinned model revision with `decisions.models()` or the Vis model catalog.
+Download the complete training checkpoint with `TrainingBundle.fetch(model_ref, destination)`.
+This explicit call downloads model assets. Local checkpoint loading does not access the network.
+
+```python
+from blockether.vis_decisions import Trainer, TrainingBundle
+
+checkpoint = TrainingBundle.open("./models/training")
+with Trainer(checkpoint) as trainer:
+    result = trainer.train(
+        train_data="./data/train.jsonl",
+        eval_data="./data/eval.jsonl",
+        training_config="./data/training.json",
+        validation_policy="./data/quality.json",
+        output_dir="./runs/customer-support-v1",
+        progress=print,
+    )
+print(result.validation_report)
+```
+
+Use complete checkpoints, not encoder-only weights or ONNX inference bundles.
+The loader verifies each file and selects the family from model provenance.
+Training rows and evaluation rows must be disjoint.
+Keep the output directory new for each run.
+Training uses one CPU thread for each physical core, or for each performance core on Apple silicon.
+To choose another number, set `OMP_NUM_THREADS` before you start Python.
+
+Decision 2.0 and D3 have no action head. Their quality policy sets only `min_decision_accuracy`.
+Their validation reports give no action accuracy.
+D3 training raises the readout score of the answer code of each row's `target` option.
+D3 prompts have no padding, so each training step runs its rows one at a time.
+
+### Choose the training device
+
+Set `device` in the training configuration to `auto`, `cpu`, `mps` or `cuda`.
+The default `auto` uses CUDA, then Apple MPS, then the CPU.
+On a Mac with Apple silicon, `auto` trains on the GPU through MPS.
+Export and validation always run on the CPU in FP32.
+The progress events and the training report name the device that trained the model.
+
+If PyTorch MPS does not support an operation of a model, training stops with an error.
+Then set `"device": "cpu"`.
+With MPS, `PYTORCH_ENABLE_MPS_FALLBACK` is an error before training starts.
+That setting moves unsupported operations to the CPU without an error, so Vis does not accept it.
+
+### Train with LoRA
+
+Laya, GLiNER, Decision 2.0 and D3 can train low-rank adapters (LoRA) instead of all weights.
+LoRA uses less memory and is faster, mostly for Decision 2.0 and D3.
+Each saved checkpoint merges the adapters into complete FP32 weights.
+Thus the export, the resume and the Vis inference stay the same as for full training.
+
+```json
+{
+  "epochs": 1,
+  "max_steps": 500,
+  "device": "auto",
+  "lora": {"rank": 16, "alpha": 32, "dropout": 0.05}
+}
+```
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `lora.rank` | An integer in [1,256] | Required |
+| `lora.alpha` | A number in (0,4096] | Two times `rank` |
+| `lora.dropout` | A number in [0,1) | `0` |
+
+For Laya, LoRA trains adapters in the encoder and the full heads.
+Do not set `"train_encoder": true` together with `lora`; that is an error.
+To train all encoder weights instead, set `"train_encoder": true` without `lora`.
+
+Decision 2.0 also accepts `max_input_tokens`, at most 16384 for Eos and 8192 for Kai.
+D3 accepts `max_input_tokens` up to 16384.
+Training cuts longer training states to this number of tokens.
+Use a smaller value to reduce memory use on a small GPU.
+
+The [Vis guide](https://github.com/Blockether/vis/blob/main/resources/vis-docs/decision-models.md#train-locally-with-the-python-sdk)
+explains the row formats, training settings and quality policy.
+The Python package also provides `Decisions(gateway)` for explicit gateway import and activation.
+
+## Resume or continue training
+
+Set `checkpoint_steps` in the training configuration to save partial checkpoints.
+Stop after a checkpoint has been saved. Reopen the saved `checkpoint` directory.
+Call `Trainer.train` with the same ordered rows and settings, using a new output directory.
+
+A matching partial run resumes its saved step and batch order.
+The optimizer is recreated, so this is not an exact optimizer-state continuation.
+Changed rows or settings start a new run from the saved weights.
+A completed checkpoint can start another fine-tuning run on new rows.
+
+## Model assets and precision
+
+Model assets remain in [Vis assets-pack](https://github.com/Blockether/vis/releases/tag/assets-pack).
+The canonical catalog is maintained in Vis and published as `decisions.json`.
+This repository does not keep a second catalog.
+
+Decide-1B FP32 and training archives exceed GitHub's per-file limit.
+They use ordered parts of at most 2,000,000,000 bytes.
+The downloader verifies every part, joins them, and verifies the complete archive before extraction.
+No conversion to FP16, BF16 or quantized weights is used to reduce their size.
+
+To prepare the Decision 2.0 FP32 bundle from the upstream checkpoint, run `scripts/export_decision2.py`.
+To prepare a D3 FP32 bundle, run `scripts/export_d3.py` with `--checkpoint`, `--output` and `--revision`.
+The D3 export accepts `d3-edge`, `d3-lite` and `d3-nano`, and checks the ONNX logits against PyTorch.
+In the D3 graph, full attention runs in blocks of 256 queries, so memory grows linearly with the prompt.
+A D3 bundle accepts prompts of up to 16,384 tokens.
+`D3TrainingBundle.from_local` makes a D3 training checkpoint from the upstream checkpoint.
+It keeps the text weights and the readout, without the vision tower.
+To pack prepared bundles for the release, run `scripts/build_release.py`.
+It verifies each file, writes reproducible archives and prints their sizes and digests for the catalog.
+
+## Development
+
+```bash
+uv sync --frozen --python 3.12
+uv run ruff format --check .
+uv run ruff check .
+uv run python -m pytest -q
+uv build
+```
+
+Most tests do not download model weights.
+To run the offline Laya acceptance tests, set `VIS_LAYA_TRAINING_DIR` to a verified complete checkpoint.
+To run the Decide-1B acceptance test, set `VIS_GLINER_DECIDE_1B_CHECKPOINT` and `VIS_GLINER_LICENSE`.
+To run the Decision 2.0 export test, set `VIS_DECISION2_CHECKPOINT` to the upstream checkpoint.
+To run the D3 export test, set `VIS_D3_CHECKPOINT` to the upstream checkpoint.
+The real-model tests cover train, stop, resume, export and reopening in a new process.
