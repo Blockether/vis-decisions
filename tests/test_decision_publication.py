@@ -170,7 +170,7 @@ def test_ambiguous_upload_reads_known_digest_without_resubmitting(
 
     monkeypatch.setattr(gateway, "post_decision_model", timeout)
     monkeypatch.setattr(
-        gateway,
+        gateway.routes,
         "get_decision_model",
         lambda ref, **_: {"model_ref": ref, "installed": True},
     )
