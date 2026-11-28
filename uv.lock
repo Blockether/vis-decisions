@@ -2839,7 +2839,7 @@ wheels = [
 
 [[package]]
 name = "vis-agent"
-version = "0.5.26"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "harbor" },
@@ -2849,14 +2849,14 @@ dependencies = [
     { name = "pydantic" },
     { name = "referencing" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/22/68/32edc0783259f8b8565af12d12629fbafb6eb411dafd311a9b693642087c/vis_agent-0.5.26.tar.gz", hash = "sha256:ec7e92f4d1ae4f8e50b80304a19a34b62c564ef13a809e1ccf04891d06b4de66", size = 733705, upload-time = "2026-11-21T15:24:25.658Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/03/a1b31b7e21ae5ba60539428daef7a80faa0287909b0a6fc5ddc7217f2398/vis_agent-0.6.0.tar.gz", hash = "sha256:69826cd626f59d3b77867451648e097bf1bc5bcbd912506f7c074edb685b66f9", size = 844590, upload-time = "2026-11-28T11:46:33.302Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/23/b8/6461d6a8b9bfc29a4fab0d60d3e8bf9c98065c8bde2643d728b723582aa4/vis_agent-0.5.26-py3-none-any.whl", hash = "sha256:7f7395d8ed879053b0068d5a810dabfdfd0b4aa084b9b19a4a5ede24a25449dd", size = 519082, upload-time = "2026-11-21T15:24:23.983Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/53/a43a1a20c527638c7dbcf9ece2e85171f1004728b4536d409e14b417bbf3/vis_agent-0.6.0-py3-none-any.whl", hash = "sha256:0d40c3056dff4e5228cc80c37439b9181d5583b8e5156de7be15fb767c1267e9", size = 604083, upload-time = "2026-11-28T11:46:31.954Z" },
 ]
 
 [[package]]
 name = "vis-decisions"
-version = "0.6.4"
+version = "0.6.5"
 source = { editable = "." }
 dependencies = [
     { name = "gliner2" },
@@ -2889,7 +2889,7 @@ requires-dist = [
     { name = "torch", marker = "sys_platform != 'linux'", specifier = "==2.14.0" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = "==2.14.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "transformers", specifier = "==5.17.0" },
-    { name = "vis-agent", specifier = ">=0.5.26" },
+    { name = "vis-agent", specifier = ">=0.6.0" },
 ]
 
 [package.metadata.requires-dev]

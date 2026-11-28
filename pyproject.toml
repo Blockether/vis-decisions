@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vis-decisions"
-version = "0.6.4"
+version = "0.6.5"
 description = "Train, resume, validate and publish Laya, GLiNER, Decision 2.0 and D3 decision models in Vis."
 keywords = ["machine-learning"]
 readme = "README.md"
@@ -13,7 +13,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "Blockether"}]
 dependencies = [
-  "vis-agent>=0.5.26",
+  "vis-agent>=0.6.0",
   "gliner2==2.0.0",
   "laya==0.3.22",
   "torch==2.14.0",

@@ -10,7 +10,7 @@ Add the extension to `vis.yml` and reload Vis. Local training requires Python 3.
 extensions:
   vis-decisions:
     source: https://github.com/Blockether/vis-decisions
-    version: '0.6.4'
+    version: '0.6.5'
 ```
 
 ## Use
